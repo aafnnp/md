@@ -5,8 +5,9 @@ framework from Zed, using the [gpui-kit](https://github.com/longbridge/gpui-kit)
 
 Two panes: write Markdown on the left, see it rendered on the right, live as you type.
 
-> **Status: early.** M0 (toolchain and skeleton) is done. The editor is not usable yet —
-> see [Roadmap](#roadmap).
+> **Status: early.** M0–M3 are done. The editor opens, edits and renders Markdown in two panes,
+> keeps tabs and a file tree, and remembers its theme. Export is still missing — see
+> [Roadmap](#roadmap).
 
 ## Stack
 
@@ -50,6 +51,42 @@ cargo test -p md-core                # pure logic tests, no Xcode needed
 cargo run -p md-app                  # opens the window
 ```
 
+## Settings
+
+The theme button at the right of the tab strip cycles **System → Light → Dark**. On *System* the
+window follows the operating system and keeps following it when it changes; a light or dark choice
+holds until it is changed back. <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> does the same.
+
+Everything else is a small JSON file in the platform's per-user configuration directory, which is
+`~/Library/Application Support/dev.aafnnp.md/settings.json` on macOS. It is read once, at startup:
+
+```json
+{
+  "theme": "system",
+  "font_family": "Helvetica Neue",
+  "font_size": 16.0,
+  "mono_font_family": "JetBrains Mono",
+  "mono_font_size": 14.0,
+  "editor_max_width": 900.0
+}
+```
+
+Every key but `theme` is optional, and leaving one out keeps the built-in default — so a file that
+only says `{"theme": "dark"}` is complete. Values out of range are pulled back into range rather
+than refused, an unreadable file falls back to the defaults, and unknown keys are ignored. Sizes
+outside 8–48 points and widths outside 320–4000 points are clamped. The app writes the file when
+the theme changes; it never rewrites a file it could not parse, so a mistake there is yours to fix
+rather than one the app silently erases.
+
+Setting the theme changes `"theme"` in the file, and writing it drops any key this build does not
+know about.
+
+**Not implemented: synchronised scrolling.** The plan called for a preview scroll ratio, but
+`gpui-base`'s `TextViewState` keeps its scroll offset private (`scroll_offset` is `pub(super)`) and
+offers no scroll handle, and `EditorState` exposes none at all. The two panes cannot be linked
+without forking the component, so the setting is left out rather than shipped as a knob that does
+nothing.
+
 ## Installing a release
 
 Release builds are **unsigned**. That has real consequences:
@@ -74,11 +111,14 @@ crates/
 ## Roadmap
 
 - [x] **M0** — toolchain gate, workspace, GPUI smoke test
-- [ ] **M1** — document core, two-pane layout, live preview with debounce
-- [ ] **M2** — tabs, file tree sidebar, unsaved-close confirmation
-- [ ] **M3** — light/dark themes, persisted settings
+- [x] **M1** — document core, two-pane layout, live preview with debounce
+- [x] **M2** — tabs, file tree sidebar, unsaved-close confirmation
+- [x] **M3** — light/dark themes, persisted settings
 - [ ] **M4** — GFM tables, images, task lists, HTML export
 - [ ] **M5** — packaging and tag-triggered multi-platform release
+- [ ] **Next** — save and save-as (there is no <kbd>Cmd</kbd>+<kbd>S</kbd> yet, so a dirty tab can
+      only be discarded), a settings panel instead of a hand-edited file, open file… alongside open
+      folder…, a native menu bar, and using `md-core`'s recent-files list
 
 ## License
 

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui_kit::base::{h_resizable, resizable_panel};
-use gpui_kit::component::button::ButtonVariant;
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::Notification;
@@ -16,7 +16,8 @@ use gpui_kit::*;
 use md_core::Document;
 use md_core::fs::{self, FileOpError};
 
-use crate::actions::{CloseTab, Quit, SelectTab};
+use crate::actions::{CloseTab, Quit, SelectTab, ToggleTheme};
+use crate::settings::{self, AppSettings};
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarRequest};
 use crate::tab::Tab;
 
@@ -51,6 +52,9 @@ pub struct Workspace {
     /// subscription created and discarded would leave the tree's rows opening
     /// nothing at all.
     _sidebar_events: Subscription,
+    /// Held for the same reason: while the theme follows the system, this is
+    /// what notices the system changing.
+    _appearance: Subscription,
 }
 
 impl Workspace {
@@ -68,12 +72,15 @@ impl Workspace {
             },
         );
 
+        let _appearance = settings::follow_system_appearance(window);
+
         let mut workspace = Self {
             tabs: Vec::new(),
             active: 0,
             sidebar,
             next_tab_id: 0,
             _sidebar_events,
+            _appearance,
         };
 
         let mut starter = Document::new();
@@ -439,14 +446,48 @@ impl Workspace {
         // `Context<Workspace>`, so `cx.listener` cannot be used here. A weak
         // handle avoids the cycle a strong `Entity` would create.
         let workspace = cx.weak_entity();
-        TabBar::new("tabs")
+        let tabs = TabBar::new("tabs")
             .selected_index(self.active)
             .children(buttons)
             .on_click(move |index, _, cx| {
                 workspace
                     .update(cx, |workspace, cx| workspace.select(*index, cx))
                     .ok();
-            })
+            });
+
+        // The theme toggle rides on the right of the tab strip: it is the one
+        // control that applies to the whole window, and the strip is the only
+        // row that is always there. It dispatches rather than calling in, so
+        // the key binding and the click take the same path.
+        let preference = AppSettings::current(cx).theme;
+        div()
+            .flex()
+            .items_center()
+            .child(div().flex_1().min_w_0().child(tabs))
+            .child(
+                Button::new("theme-toggle")
+                    .ghost()
+                    .label(preference.label())
+                    .tooltip("Theme: follow the system, light, or dark")
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleTheme), cx)),
+            )
+    }
+
+    /// Advance the theme preference and write it down.
+    ///
+    /// The theme changes even when saving fails; only the button label and the
+    /// next launch are affected, and a notification says so.
+    fn toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
+        let (preference, failure) = settings::cycle_theme(window, cx);
+        if let Some(error) = failure {
+            window.push_notification(
+                Notification::warning(format!(
+                    "The theme is {} for now, but saving the setting failed: {error}",
+                    preference.label()
+                )),
+                cx,
+            );
+        }
     }
 
     fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -631,6 +672,7 @@ impl Render for Workspace {
                 cx.listener(|this, _: &CloseTab, window, cx| this.request_close_active(window, cx)),
             )
             .on_action(cx.listener(|this, action: &SelectTab, _, cx| this.select(action.0, cx)))
+            .on_action(cx.listener(Self::toggle_theme))
             .child(self.render_tab_strip(cx))
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
     }

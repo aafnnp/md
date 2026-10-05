@@ -7,6 +7,8 @@
 pub mod document;
 pub mod fs;
 pub mod recent;
+pub mod settings;
 
 pub use document::Document;
 pub use recent::RecentFiles;
+pub use settings::{Settings, ThemePreference};
