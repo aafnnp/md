@@ -149,6 +149,14 @@ impl Sidebar {
         .detach();
     }
 
+    /// The folder the tree is rooted at, if the user has opened one.
+    ///
+    /// The workspace reads this to decide where a save-as prompt should start
+    /// when the document has no folder of its own to offer.
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
     /// Root the tree at `root` and show its top level.
     fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.expanded.clear();

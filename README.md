@@ -5,9 +5,9 @@ framework from Zed, using the [gpui-kit](https://github.com/longbridge/gpui-kit)
 
 Two panes: write Markdown on the left, see it rendered on the right, live as you type.
 
-> **Status: early.** M0–M3 are done. The editor opens, edits and renders Markdown in two panes,
-> keeps tabs and a file tree, and remembers its theme. Export is still missing — see
-> [Roadmap](#roadmap).
+> **Status: early.** M0–M3 are done, and files can be saved. The editor opens, edits, renders and
+> saves Markdown in two panes, keeps tabs and a file tree, and remembers its theme. Export is still
+> missing — see [Roadmap](#roadmap).
 
 ## Stack
 
@@ -50,6 +50,23 @@ Then:
 cargo test -p md-core                # pure logic tests, no Xcode needed
 cargo run -p md-app                  # opens the window
 ```
+
+## Saving
+
+<kbd>Cmd</kbd>+<kbd>S</kbd> writes the active tab. A buffer that has never been saved has no file to
+write to, so it gets the save-as prompt instead of an error. <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd>
+always asks: the field starts on the current name, in the file's own folder, falling back to the
+folder the tree is open on.
+
+A name that is already taken is asked about twice — the button changes from *Save* to *Replace*, and
+only the second press writes. Editing the name withdraws that agreement, so the question is always
+about the path that was actually named. Saving onto a file that a *second tab* is showing is refused
+outright rather than confirmed: two tabs over one file means each save silently undoes the other, and
+agreeing to it would not make that less true. Closing that tab, or saving under another name, is the
+way forward.
+
+A tab's dirty dot clears when its text reaches the disk, and the tab is retargeted by save-as, so the
+next <kbd>Cmd</kbd>+<kbd>S</kbd> writes there rather than asking again.
 
 ## Settings
 
@@ -116,9 +133,10 @@ crates/
 - [x] **M3** — light/dark themes, persisted settings
 - [ ] **M4** — GFM tables, images, task lists, HTML export
 - [ ] **M5** — packaging and tag-triggered multi-platform release
-- [ ] **Next** — save and save-as (there is no <kbd>Cmd</kbd>+<kbd>S</kbd> yet, so a dirty tab can
-      only be discarded), a settings panel instead of a hand-edited file, open file… alongside open
-      folder…, a native menu bar, and using `md-core`'s recent-files list
+- [x] **Save** — <kbd>Cmd</kbd>+<kbd>S</kbd> / <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd>, with
+      an overwrite confirmation and a guard against two tabs over one file
+- [ ] **Next** — a settings panel instead of a hand-edited file, open file… alongside open folder…,
+      a native menu bar, and using `md-core`'s recent-files list
 
 ## License
 

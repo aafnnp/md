@@ -14,9 +14,9 @@ use gpui_kit::component::{ActiveTheme, WindowExt as _, v_flex};
 use gpui_kit::*;
 
 use md_core::Document;
-use md_core::fs::{self, FileOpError};
+use md_core::fs;
 
-use crate::actions::{CloseTab, Quit, SelectTab, ToggleTheme};
+use crate::actions::{CloseTab, Quit, Save, SaveAs, SelectTab, ToggleTheme};
 use crate::settings::{self, AppSettings};
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarRequest};
 use crate::tab::Tab;
@@ -146,8 +146,8 @@ impl Workspace {
 
     /// Ask for a name, then carry out `target` with it.
     ///
-    /// Creating a file and renaming one differ only in what they do with the
-    /// name, so they share one prompt.
+    /// Creating a file, renaming one and saving under a new name differ only in
+    /// what they do with the name, so they share one prompt.
     fn prompt_for_name(&self, target: NameTarget, window: &mut Window, cx: &mut Context<Self>) {
         // The dialog's callbacks are handed `&mut App`, not `Context<Workspace>`,
         // so the workspace is reached through a weak handle — see
@@ -159,39 +159,57 @@ impl Workspace {
         // afterwards to put the caret in the field.
         let focus = form.read(cx).input.read(cx).focus_handle(cx).clone();
         let title = target.title();
-        // `Dialog` carries the button labels in `DialogButtonProps` rather than
-        // taking them directly, and its Cancel button is off by default — the
-        // one that pairs with Escape has to be asked for.
-        let buttons = DialogButtonProps::default()
-            .show_cancel(true)
-            .ok_text(target.ok_text())
-            .cancel_text("Cancel");
         let dialog_form = form.clone();
 
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let workspace = workspace.clone();
             let form = dialog_form.clone();
             let target = target.clone();
 
+            // `Dialog` carries the button labels in `DialogButtonProps` rather
+            // than taking them directly, and its Cancel button is off by
+            // default — the one that pairs with Escape has to be asked for.
+            // Built here rather than once outside, because the label follows the
+            // form: a name that turns out to be taken changes the button from
+            // the target's own verb to what pressing it will actually do.
+            let buttons = DialogButtonProps::default()
+                .show_cancel(true)
+                .ok_text(if form.read(cx).confirmed.is_some() {
+                    "Replace"
+                } else {
+                    target.ok_text()
+                })
+                .cancel_text("Cancel");
+
             dialog
                 .title(title)
                 .w(px(380.))
-                .button_props(buttons.clone())
+                .button_props(buttons)
                 .content({
                     let form = form.clone();
                     move |content, _, _| content.child(form.clone())
                 })
                 .on_ok(move |_, window, cx| {
                     let name = form.read(cx).value(cx);
-                    match workspace
-                        .update(cx, |workspace, cx| workspace.apply_name(&target, &name, cx))
-                    {
-                        Ok(Ok(())) => true,
+                    // Only a path the user has already been told about counts
+                    // as agreeing to replace it.
+                    let confirmed = form.read(cx).confirmed.clone();
+                    match workspace.update(cx, |workspace, cx| {
+                        workspace.apply_name(&target, &name, confirmed.as_deref(), cx)
+                    }) {
+                        Ok(NameOutcome::Done) => true,
                         // A name the filesystem will not take keeps the dialog
                         // up with the reason under the field, so it can be
                         // corrected without retyping it.
-                        Ok(Err(error)) => {
-                            form.update(cx, |form, cx| form.reject(error.to_string(), window, cx));
+                        Ok(NameOutcome::Refused(message)) => {
+                            form.update(cx, |form, cx| form.reject(message, window, cx));
+                            false
+                        }
+                        // Same, but the next press of the button goes through.
+                        Ok(NameOutcome::Replace { path, message }) => {
+                            form.update(cx, |form, cx| {
+                                form.confirm_replace(path, message, window, cx)
+                            });
                             false
                         }
                         // The workspace is gone; there is nobody left to name a
@@ -211,30 +229,149 @@ impl Workspace {
 
     /// Carry out a name prompt's request.
     ///
-    /// The error is returned rather than reported here, because the dialog is
+    /// The outcome is returned rather than reported here, because the dialog is
     /// what shows it — and it can only keep itself open for a name it was told
     /// about.
     fn apply_name(
         &mut self,
         target: &NameTarget,
         name: &str,
+        confirmed: Option<&Path>,
         cx: &mut Context<Self>,
-    ) -> Result<(), FileOpError> {
+    ) -> NameOutcome {
         match target {
             NameTarget::NewFile { directory } => {
-                fs::create_file(directory, name)?;
+                if let Err(error) = fs::create_file(directory, name) {
+                    return NameOutcome::Refused(error.to_string());
+                }
             }
             NameTarget::Rename { path } => {
                 // Decided here rather than carried in the request: whether a
                 // path is a directory is a fact about the filesystem, and
                 // reading it now is what makes it true at the moment it matters.
-                let moved = fs::rename(path, name, path.is_dir())?;
-                self.repath_tabs(path, &moved, cx);
+                match fs::rename(path, name, path.is_dir()) {
+                    Ok(moved) => self.repath_tabs(path, &moved, cx),
+                    Err(error) => return NameOutcome::Refused(error.to_string()),
+                }
+            }
+            NameTarget::SaveAs { tab, directory, .. } => {
+                let resolved = match fs::resolve_file_name(name) {
+                    Ok(resolved) => resolved,
+                    Err(error) => return NameOutcome::Refused(error.to_string()),
+                };
+                let outcome = self.save_tab_as(tab, directory.join(resolved), confirmed, cx);
+                if !matches!(outcome, NameOutcome::Done) {
+                    return outcome;
+                }
             }
         }
+
         // The rows came from disk, and the disk just changed.
         self.sidebar.update(cx, |sidebar, cx| sidebar.refresh(cx));
-        Ok(())
+        NameOutcome::Done
+    }
+
+    /// Write `tab` to `path`, refusing the two ways that could lose work.
+    ///
+    /// Split out of [`Self::apply_name`] because it is the one branch that has
+    /// to consult the tabs as well as the filesystem, and that is the whole
+    /// reason the prompt goes through the workspace rather than being carried
+    /// out by the dialog.
+    fn save_tab_as(
+        &mut self,
+        tab: &Entity<Tab>,
+        path: PathBuf,
+        confirmed: Option<&Path>,
+        cx: &mut Context<Self>,
+    ) -> NameOutcome {
+        // Saving to the name it already has is an ordinary save. There is
+        // nothing to warn about: the file being written over is this tab's own.
+        if tab.read(cx).path() == Some(path.as_path()) {
+            return match tab.update(cx, |tab, cx| tab.save_to(None, cx)) {
+                Ok(()) => NameOutcome::Done,
+                Err(error) => NameOutcome::Refused(error.to_string()),
+            };
+        }
+
+        // Two tabs over one file means each save silently undoes the other,
+        // whichever order they come in. Refused rather than confirmed, because
+        // confirming would leave the other tab showing text that is no longer
+        // there.
+        if self.open_tab_for(&path, cx).is_some() {
+            return NameOutcome::Refused(format!(
+                "“{}” is open in another tab. Close that tab, or save under a different name.",
+                file_label(&path)
+            ));
+        }
+
+        // There is no undo for a file written over, so a name that is already
+        // taken has to be asked about twice.
+        if path.exists() && confirmed != Some(path.as_path()) {
+            let message = format!(
+                "“{}” already exists. Replacing it cannot be undone.",
+                file_label(&path)
+            );
+            return NameOutcome::Replace { path, message };
+        }
+
+        match tab.update(cx, |tab, cx| tab.save_to(Some(path), cx)) {
+            Ok(()) => NameOutcome::Done,
+            Err(error) => NameOutcome::Refused(error.to_string()),
+        }
+    }
+
+    /// `Cmd+S`: write the active tab to its file.
+    ///
+    /// A buffer that has never been saved has no file to write to, so it gets
+    /// the same question Save As asks rather than a failure.
+    fn save_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active).cloned() else {
+            return;
+        };
+        if tab.read(cx).path().is_none() {
+            self.save_as_active(window, cx);
+            return;
+        }
+
+        if let Err(error) = tab.update(cx, |tab, cx| tab.save_to(None, cx)) {
+            let name = tab.read(cx).title();
+            window.push_notification(
+                Notification::error(format!("Could not save “{name}”: {error}")),
+                cx,
+            );
+        }
+    }
+
+    /// `Cmd+Shift+S`: write the active tab to a name the user chooses.
+    fn save_as_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active).cloned() else {
+            return;
+        };
+        let directory = self.naming_directory(&tab, cx);
+        let suggested = tab.read(cx).path().map(file_label).unwrap_or_default();
+        self.prompt_for_name(
+            NameTarget::SaveAs {
+                tab,
+                directory,
+                suggested,
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Where a save-as prompt should start from: the folder the file already
+    /// lives in, otherwise the folder the tree is rooted at, otherwise the
+    /// working directory — whichever of the three the app can actually name.
+    fn naming_directory(&self, tab: &Entity<Tab>, cx: &App) -> PathBuf {
+        if let Some(parent) = tab.read(cx).path().and_then(Path::parent) {
+            return parent.to_path_buf();
+        }
+        self.sidebar
+            .read(cx)
+            .root()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     /// Delete a file, asking first.
@@ -516,6 +653,18 @@ enum NameTarget {
     NewFile { directory: PathBuf },
     /// Move this file or directory to a new name, within the folder it is in.
     Rename { path: PathBuf },
+    /// Write this tab to a file named here, inside this directory.
+    ///
+    /// The tab is named rather than looked up when the name arrives, so the
+    /// prompt cannot end up saving whichever tab happens to be active later.
+    /// `suggested` is read out when the prompt opens: a copy usually differs
+    /// from its original by a word, and the field is easier to correct than to
+    /// fill in.
+    SaveAs {
+        tab: Entity<Tab>,
+        directory: PathBuf,
+        suggested: String,
+    },
 }
 
 impl NameTarget {
@@ -526,6 +675,7 @@ impl NameTarget {
             // told first, since the two take different naming rules.
             Self::Rename { path } if path.is_dir() => "Rename folder",
             Self::Rename { .. } => "Rename file",
+            Self::SaveAs { .. } => "Save as",
         }
     }
 
@@ -533,16 +683,18 @@ impl NameTarget {
         match self {
             Self::NewFile { .. } => "Create",
             Self::Rename { .. } => "Rename",
+            Self::SaveAs { .. } => "Save",
         }
     }
 
     /// The name to start the field with: empty for a new file, and the current
-    /// name for a rename, so correcting one character does not mean retyping
-    /// the whole name.
+    /// name for a rename or a save-as, so correcting one character does not mean
+    /// retyping the whole name.
     fn initial_name(&self) -> String {
         match self {
             Self::NewFile { .. } => String::new(),
             Self::Rename { path } => file_label(path),
+            Self::SaveAs { suggested, .. } => suggested.clone(),
         }
     }
 
@@ -550,7 +702,9 @@ impl NameTarget {
     /// for a name without saying where it will go.
     fn caption(&self) -> String {
         let directory = match self {
-            Self::NewFile { directory } => Some(directory.as_path()),
+            Self::NewFile { directory } | Self::SaveAs { directory, .. } => {
+                Some(directory.as_path())
+            }
             Self::Rename { path } => path.parent(),
         };
         match directory {
@@ -560,6 +714,25 @@ impl NameTarget {
             _ => String::new(),
         }
     }
+}
+
+/// What carrying out a name prompt's request did, as far as the dialog is
+/// concerned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NameOutcome {
+    /// Done, and the dialog can close.
+    Done,
+    /// Refused. The dialog stays up with this message under the field, so the
+    /// name can be corrected without retyping it.
+    Refused(String),
+    /// The name belongs to a file that is already there. The dialog stays up,
+    /// and its OK button becomes Replace — sending this same path back as the
+    /// confirmed one is what makes the replacement happen.
+    ///
+    /// Held as a path rather than a flag so that editing the name afterwards
+    /// withdraws the confirmation on its own: a different name resolves to a
+    /// different path, and a different path has not been agreed to.
+    Replace { path: PathBuf, message: String },
 }
 
 /// The dialog body that collects a file name.
@@ -573,6 +746,12 @@ struct NameForm {
     caption: String,
     /// Why the last submitted name was refused, or `None` before any was.
     error: Option<String>,
+    /// The exact path the user has agreed to overwrite, if any.
+    ///
+    /// A path and not a flag: it is what the OK button's label is read from,
+    /// and it stops a confirmation given for one name from carrying over to
+    /// another one typed afterwards.
+    confirmed: Option<PathBuf>,
 }
 
 impl NameForm {
@@ -591,6 +770,7 @@ impl NameForm {
             input,
             caption,
             error: None,
+            confirmed: None,
         })
     }
 
@@ -601,9 +781,34 @@ impl NameForm {
     /// Record a refusal, and put the caret back in the field so the name can be
     /// corrected without another click.
     fn reject(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
+        // A refusal withdraws any earlier agreement to replace: the name it was
+        // given for is not the one being refused now.
+        self.confirmed = None;
+        self.show(message, window, cx);
+    }
+
+    /// Record what the name would replace, and ask again more explicitly.
+    fn confirm_replace(
+        &mut self,
+        path: PathBuf,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirmed = Some(path);
+        self.show(message, window, cx);
+    }
+
+    /// Show `message` under the field and put the caret back in it.
+    ///
+    /// The window is refreshed because the OK button's label is built by the
+    /// dialog, not by this form — this entity notifying on its own would update
+    /// the message and leave the button reading "Save".
+    fn show(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
         self.error = Some(message);
         let focus = self.input.read(cx).focus_handle(cx).clone();
         window.focus(&focus, cx);
+        window.refresh();
         cx.notify();
     }
 }
@@ -673,6 +878,8 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|this, action: &SelectTab, _, cx| this.select(action.0, cx)))
             .on_action(cx.listener(Self::toggle_theme))
+            .on_action(cx.listener(|this, _: &Save, window, cx| this.save_active(window, cx)))
+            .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save_as_active(window, cx)))
             .child(self.render_tab_strip(cx))
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
     }
@@ -682,7 +889,7 @@ impl Render for Workspace {
 mod tests {
     // Imported narrowly: `use super::*` would drag in the `gpui_kit::*` glob,
     // whose `test` attribute macro shadows the built-in `#[test]`.
-    use super::{NameTarget, STARTER_DOCUMENT, Workspace};
+    use super::{NameOutcome, NameTarget, STARTER_DOCUMENT, Workspace};
     use crate::actions::{CloseTab, SelectTab};
     use crate::sidebar::SidebarRequest;
     use gpui_kit::base::Root;
@@ -693,7 +900,7 @@ mod tests {
         WindowOptions, px, size,
     };
     use md_core::Document;
-    use md_core::fs::FileOpError;
+    use md_core::fs::NameError;
     use std::path::{Path, PathBuf};
 
     fn open_workspace(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Workspace>) {
@@ -929,7 +1136,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Create `name` in `directory`, exactly as the name dialog's OK button
+    /// Submit `name` to the workspace, exactly as the name dialog's OK button
     /// does once it has the text.
     fn apply(
         window: WindowHandle<Root>,
@@ -937,11 +1144,48 @@ mod tests {
         target: &NameTarget,
         name: &str,
         cx: &mut TestAppContext,
-    ) -> Result<(), FileOpError> {
+    ) -> NameOutcome {
+        apply_confirmed(window, workspace, target, name, None, cx)
+    }
+
+    /// The same, for the second press of a button whose first press was turned
+    /// down to ask about replacing something. `confirmed` is the path the form
+    /// was told about, and only that path counts as agreed to.
+    fn apply_confirmed(
+        window: WindowHandle<Root>,
+        workspace: &Entity<Workspace>,
+        target: &NameTarget,
+        name: &str,
+        confirmed: Option<&Path>,
+        cx: &mut TestAppContext,
+    ) -> NameOutcome {
         cx.update_window(window.into(), |_, _, cx| {
-            workspace.update(cx, |workspace, cx| workspace.apply_name(target, name, cx))
+            workspace.update(cx, |workspace, cx| {
+                workspace.apply_name(target, name, confirmed, cx)
+            })
         })
         .unwrap()
+    }
+
+    /// Type `text` into the active tab's source pane, as the user would.
+    ///
+    /// Going through the window rather than calling `Document::set_text` is the
+    /// point: the editor is what a save reads, so a test that did not type into
+    /// it would pass without proving anything about the text that gets written.
+    fn type_into_active_tab(
+        window: WindowHandle<Root>,
+        workspace: &Entity<Workspace>,
+        text: &str,
+        cx: &mut TestAppContext,
+    ) {
+        let focus = workspace.read_with(cx, |workspace, cx| {
+            workspace.tabs[workspace.active].read(cx).editor_focus(cx)
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.focus(&focus, cx);
+            window.input(text, cx);
+        })
+        .unwrap();
     }
 
     /// The path a tab is editing, read back through the entity.
@@ -962,7 +1206,7 @@ mod tests {
         let (window, workspace) = open_workspace(cx);
         let dir = scratch("new-file");
 
-        apply(
+        let outcome = apply(
             window,
             &workspace,
             &NameTarget::NewFile {
@@ -970,8 +1214,8 @@ mod tests {
             },
             "notes",
             cx,
-        )
-        .expect("the file should be created");
+        );
+        assert_eq!(outcome, NameOutcome::Done);
 
         assert_eq!(std::fs::read_to_string(dir.join("notes.md")).unwrap(), "");
 
@@ -985,7 +1229,7 @@ mod tests {
         let (window, workspace) = open_workspace(cx);
         let dir = scratch("escape");
 
-        let error = apply(
+        let outcome = apply(
             window,
             &workspace,
             &NameTarget::NewFile {
@@ -993,10 +1237,13 @@ mod tests {
             },
             "../escape",
             cx,
-        )
-        .unwrap_err();
+        );
 
-        assert!(matches!(error, FileOpError::Name(_)), "got {error:?}");
+        assert_eq!(
+            outcome,
+            NameOutcome::Refused(NameError::NotAFileName.to_string()),
+            "the refusal must reach the dialog, which is what shows it"
+        );
         assert!(!dir.parent().unwrap().join("escape.md").exists());
 
         std::fs::remove_dir_all(&dir).ok();
@@ -1015,7 +1262,7 @@ mod tests {
         sidebar.update(cx, |sidebar, cx| sidebar.open(before.clone(), cx));
         assert_eq!(titles(cx, &workspace), ["Untitled", "before.md"]);
 
-        apply(
+        let outcome = apply(
             window,
             &workspace,
             &NameTarget::Rename {
@@ -1023,8 +1270,8 @@ mod tests {
             },
             "after",
             cx,
-        )
-        .expect("the rename should succeed");
+        );
+        assert_eq!(outcome, NameOutcome::Done, "the rename should succeed");
 
         let after = dir.join("after.md");
         assert!(after.exists(), "the file should be at its new name");
@@ -1052,7 +1299,7 @@ mod tests {
         let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
         sidebar.update(cx, |sidebar, cx| sidebar.open(folder.join("note.md"), cx));
 
-        apply(
+        let outcome = apply(
             window,
             &workspace,
             &NameTarget::Rename {
@@ -1060,8 +1307,8 @@ mod tests {
             },
             "notes",
             cx,
-        )
-        .expect("the rename should succeed");
+        );
+        assert_eq!(outcome, NameOutcome::Done, "the rename should succeed");
 
         let moved = dir.join("notes").join("note.md");
         assert!(moved.exists());
@@ -1151,5 +1398,195 @@ mod tests {
         assert_eq!(create.initial_name(), "");
         assert_eq!(create.ok_text(), "Create");
         assert_eq!(create.title(), "New file");
+    }
+
+    /// The text the active tab's editor holds, read back through the entity.
+    fn active_tab_text(workspace: &Entity<Workspace>, cx: &TestAppContext) -> String {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.tabs[workspace.active].read(cx).text(cx)
+        })
+    }
+
+    fn active_tab_is_dirty(workspace: &Entity<Workspace>, cx: &TestAppContext) -> bool {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.tabs[workspace.active].read(cx).is_dirty()
+        })
+    }
+
+    /// `Cmd+S` puts what is on screen into the file, and the tab stops being
+    /// dirty once it lands.
+    #[gpui_kit::test]
+    fn saving_writes_the_editors_text_and_clears_the_dirty_dot(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("save");
+        let path = dir.join("note.md");
+        std::fs::write(&path, "# old\n").unwrap();
+
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(path.clone(), cx));
+        assert!(
+            !active_tab_is_dirty(&workspace, cx),
+            "a fresh open is clean"
+        );
+
+        type_into_active_tab(window, &workspace, "\n# new", cx);
+        assert!(active_tab_is_dirty(&workspace, cx), "the typing lands");
+
+        cx.update_window(window.into(), |_, window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.save_active(window, cx));
+        })
+        .unwrap();
+
+        // Compared against the editor rather than a hard-coded string: where
+        // the caret sat when the typing started is not what this is testing.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            active_tab_text(&workspace, cx),
+            "the bytes on disk must be the ones on screen"
+        );
+        assert!(
+            !active_tab_is_dirty(&workspace, cx),
+            "the dirty dot goes out"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An untitled buffer has no file to write to, so Cmd+S asks for a name
+    /// instead of failing.
+    #[gpui_kit::test]
+    fn saving_an_untitled_tab_asks_for_a_name(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        type_into_active_tab(window, &workspace, "\n# draft", cx);
+
+        cx.update_window(window.into(), |_, window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.save_active(window, cx));
+        })
+        .unwrap();
+
+        assert!(
+            has_dialog(window, cx),
+            "a buffer with no name must be asked for one"
+        );
+        assert!(
+            active_tab_is_dirty(&workspace, cx),
+            "and nothing may have been written in the meantime"
+        );
+    }
+
+    /// Save-as to a name nothing is using writes the file and moves the tab
+    /// onto it, so the next Cmd+S writes there rather than asking again.
+    #[gpui_kit::test]
+    fn save_as_creates_the_file_and_retargets_the_tab(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("save-as-new");
+
+        type_into_active_tab(window, &workspace, "\n# draft", cx);
+        let tab = workspace.read_with(cx, |workspace, _| workspace.tabs[0].clone());
+
+        let outcome = apply(
+            window,
+            &workspace,
+            &NameTarget::SaveAs {
+                tab: tab.clone(),
+                directory: dir.clone(),
+                suggested: String::new(),
+            },
+            "draft",
+            cx,
+        );
+        assert_eq!(outcome, NameOutcome::Done);
+
+        let written = dir.join("draft.md");
+        assert_eq!(
+            std::fs::read_to_string(&written).unwrap(),
+            active_tab_text(&workspace, cx)
+        );
+        assert_eq!(tab_path(&workspace, 0, cx), Some(written));
+        assert!(!tab.read_with(cx, |tab, _| tab.is_dirty()));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A name that is already taken is asked about before it is written over.
+    /// The first press writes nothing; only answering it does.
+    #[gpui_kit::test]
+    fn save_as_asks_before_replacing_a_file_that_is_already_there(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("save-as-existing");
+        let taken = dir.join("taken.md");
+        std::fs::write(&taken, "# original").unwrap();
+
+        let tab = workspace.read_with(cx, |workspace, _| workspace.tabs[0].clone());
+        let target = NameTarget::SaveAs {
+            tab,
+            directory: dir.clone(),
+            suggested: String::new(),
+        };
+
+        let outcome = apply(window, &workspace, &target, "taken", cx);
+        let NameOutcome::Replace { path, .. } = outcome else {
+            panic!("the first press has to ask, got {outcome:?}");
+        };
+        assert_eq!(path, taken);
+        assert_eq!(
+            std::fs::read_to_string(&taken).unwrap(),
+            "# original",
+            "nothing may be written before the question is answered"
+        );
+
+        // Answering yes is the same press again, carrying the path the form was
+        // told about. A different path would be a different question.
+        let outcome = apply_confirmed(window, &workspace, &target, "taken", Some(&path), cx);
+        assert_eq!(outcome, NameOutcome::Done);
+        assert_eq!(
+            std::fs::read_to_string(&taken).unwrap(),
+            active_tab_text(&workspace, cx),
+            "and now it really is written over"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Save-as onto a file a second tab is showing is refused rather than
+    /// confirmed: two tabs over one file means each save silently undoes the
+    /// other, and agreeing to that would not make it less true.
+    #[gpui_kit::test]
+    fn save_as_onto_a_file_another_tab_is_showing_is_refused(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("save-as-open");
+        let taken = dir.join("shared.md");
+        std::fs::write(&taken, "# shared").unwrap();
+
+        // The tree opens the file in a second tab, which becomes the active one.
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(taken.clone(), cx));
+        assert_eq!(tab_path(&workspace, 1, cx), Some(taken.clone()));
+
+        // The untitled first tab is the one being saved under that name.
+        let tab = workspace.read_with(cx, |workspace, _| workspace.tabs[0].clone());
+        let outcome = apply(
+            window,
+            &workspace,
+            &NameTarget::SaveAs {
+                tab,
+                directory: dir.clone(),
+                suggested: String::new(),
+            },
+            "shared",
+            cx,
+        );
+
+        let NameOutcome::Refused(message) = outcome else {
+            panic!("two tabs over one file must be refused, got {outcome:?}");
+        };
+        assert!(message.contains("another tab"), "got {message}");
+        assert_eq!(
+            std::fs::read_to_string(&taken).unwrap(),
+            "# shared",
+            "the other tab's file must be untouched"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

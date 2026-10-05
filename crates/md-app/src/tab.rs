@@ -1,5 +1,6 @@
 //! One open document: its source pane and the preview beside it.
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -98,6 +99,39 @@ impl Tab {
     #[cfg(test)]
     pub fn text(&self, cx: &App) -> String {
         self.editor.read(cx).state.read(cx).value().to_string()
+    }
+
+    /// A handle on the source pane, so a test can put the caret in it and type.
+    ///
+    /// Gated like `text`: creating the tab already focuses its editor, so the
+    /// only caller that has to do it again is a test moving between tabs.
+    #[cfg(test)]
+    pub fn editor_focus(&self, cx: &App) -> FocusHandle {
+        self.editor.read(cx).state.read(cx).focus_handle(cx)
+    }
+
+    /// Write the buffer to disk, and say whether it got there.
+    ///
+    /// `path` is the Save As case: the file to adopt. `None` writes back to the
+    /// file this tab already has, and fails for a document that never had one.
+    ///
+    /// The editor is read here rather than the document being trusted. The
+    /// change subscription keeps the two in step for the dirty dot, but what is
+    /// written has to be what is on screen, and the buffer is the authority on
+    /// that.
+    pub fn save_to(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) -> io::Result<()> {
+        let markdown = self.editor.read(cx).state.read(cx).value().to_string();
+        self.document.set_text(markdown);
+
+        match path {
+            Some(path) => self.document.save_as(path),
+            None => self.document.save(),
+        }?;
+
+        // The dirty dot goes out, and a first save replaces "Untitled" with the
+        // file's own name.
+        cx.notify();
+        Ok(())
     }
 
     /// Follow the file this tab was showing to the path it was renamed to.
