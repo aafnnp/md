@@ -1,6 +1,6 @@
 //! One open document: its source pane and the preview beside it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui_kit::base::{h_resizable, resizable_panel};
@@ -98,6 +98,17 @@ impl Tab {
     #[cfg(test)]
     pub fn text(&self, cx: &App) -> String {
         self.editor.read(cx).state.read(cx).value().to_string()
+    }
+
+    /// Follow the file this tab was showing to the path it was renamed to.
+    ///
+    /// Called by the workspace after it moves the file on disk. The buffer is
+    /// deliberately left alone: the text is the same, and so is whether it has
+    /// been saved.
+    pub fn repath(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.document.repath(path);
+        // The tab strip shows the file name, so it has to be redrawn.
+        cx.notify();
     }
 
     /// Schedule a preview re-render, replacing any pending one.

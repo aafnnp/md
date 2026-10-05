@@ -78,6 +78,18 @@ impl Document {
         }
     }
 
+    /// Point the document at a file it has been moved to, without touching
+    /// either the filesystem or the buffer.
+    ///
+    /// Renaming an open file has to bring its tab along. Left where it was, the
+    /// tab would show the old name, and a later save would write the old path
+    /// back into existence — recreating the very file the user renamed away.
+    /// The contents and the dirty flag are untouched: nothing about the text
+    /// changed, only where it lives.
+    pub fn repath(&mut self, path: impl Into<PathBuf>) {
+        self.path = Some(path.into());
+    }
+
     /// Re-read from disk, discarding unsaved changes.
     pub fn revert(&mut self) -> std::io::Result<()> {
         let path = self
@@ -150,5 +162,34 @@ mod tests {
         let mut doc = Document::new();
         doc.set_text("x");
         assert!(doc.save().is_err());
+    }
+
+    #[test]
+    fn repathing_follows_a_rename_without_touching_the_buffer() {
+        let dir = std::env::temp_dir().join(format!("md-core-repath-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let before = dir.join("before.md");
+        let after = dir.join("after.md");
+        std::fs::write(&before, "# body\n").unwrap();
+
+        let mut doc = Document::open(&before).unwrap();
+        std::fs::rename(&before, &after).unwrap();
+        doc.repath(&after);
+
+        assert_eq!(doc.path(), Some(after.as_path()));
+        assert_eq!(doc.display_name(), "after.md");
+        assert_eq!(doc.text(), "# body\n");
+        assert_eq!(doc.base_dir(), dir);
+        // The move did not make it dirty: the text still matches what was read.
+        assert!(!doc.is_dirty());
+
+        // Saving now writes to the new name. Without `repath` this would
+        // recreate `before.md` and leave `after.md` untouched.
+        doc.set_text("# edited\n");
+        doc.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&after).unwrap(), "# edited\n");
+        assert!(!before.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

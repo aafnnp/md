@@ -11,23 +11,36 @@ use std::rc::Rc;
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::list::ListItem;
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::tree::{self, TreeEvent, TreeItem, TreeState};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
+
+use md_core::fs::is_markdown;
+
+/// Something the tree's context menu asks for.
+///
+/// None of these is carried out here. Each one changes the filesystem, and the
+/// filesystem is shared with the tabs that have those files open — so the
+/// request goes to the workspace, which is the only thing that knows both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarRequest {
+    /// Create an empty Markdown file in this directory.
+    NewFile { directory: PathBuf },
+    /// Rename this file or directory.
+    Rename { path: PathBuf },
+    /// Delete this file.
+    DeleteFile { path: PathBuf },
+}
 
 /// What the sidebar asks of whoever owns it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarEvent {
     /// A file row was activated; open it in a tab.
     Open(PathBuf),
+    /// The context menu asked for a change that the owner must carry out.
+    Request(SidebarRequest),
 }
-
-/// The extensions the tree lists.
-///
-/// This is a Markdown editor's tree, not a file browser. Listing every file
-/// under the folder would mostly offer rows that fail the moment they are
-/// clicked, so the listing is narrowed to what the editor can actually open.
-const MARKDOWN_EXTENSIONS: [&str; 3] = ["md", "markdown", "mdx"];
 
 /// Left padding of a top-level row, and how much each level of nesting adds.
 const ROW_PADDING: f32 = 10.;
@@ -96,6 +109,20 @@ impl Sidebar {
     /// have to guess.
     pub(crate) fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         cx.emit(SidebarEvent::Open(path));
+    }
+
+    /// Ask the owner to carry out a context-menu request.
+    fn request(&mut self, request: SidebarRequest, cx: &mut Context<Self>) {
+        cx.emit(SidebarEvent::Request(request));
+    }
+
+    /// Re-read the folder from disk.
+    ///
+    /// The owner calls this after changing a file the tree lists, so that the
+    /// rows match what is on disk rather than what was there when the menu was
+    /// opened.
+    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.rebuild(cx);
     }
 
     /// Ask the user for a folder and root the tree at it.
@@ -254,16 +281,19 @@ impl Sidebar {
                 .into_any_element();
         }
 
-        let sidebar = cx.weak_entity();
+        // Two weak handles rather than one: each closure below captures by
+        // move, so a single handle could not be shared between them.
+        let row_sidebar = cx.weak_entity();
+        let menu_sidebar = cx.weak_entity();
         let directories = self.directories.clone();
+        let menu_directories = self.directories.clone();
         let muted = cx.theme().muted_foreground;
 
         div()
             .flex_1()
             .min_h_0()
-            .child(tree::tree(
-                &self.tree,
-                move |_ix, entry, _selected, _window, _cx| {
+            .child(
+                tree::tree(&self.tree, move |_ix, entry, _selected, _window, _cx| {
                     let id = entry.item().id.clone();
                     let name = entry.item().label.clone();
                     let is_dir = directories.contains(id.as_ref());
@@ -288,7 +318,7 @@ impl Sidebar {
                     // handler already toggles it. Only a file row needs a
                     // handler, and only a file row may be opened.
                     if !is_dir {
-                        let sidebar = sidebar.clone();
+                        let sidebar = row_sidebar.clone();
                         row = row.on_click(move |_, _, cx| {
                             let path = PathBuf::from(id.to_string());
                             sidebar
@@ -297,8 +327,76 @@ impl Sidebar {
                         });
                     }
                     row
-                },
-            ))
+                })
+                .context_menu(move |_ix, entry, menu, _window, _cx| {
+                    let id = entry.item().id.clone();
+                    let path = PathBuf::from(id.as_ref());
+                    let is_dir = menu_directories.contains(id.as_ref());
+                    // The root row is the folder the tree is rooted at.
+                    // Renaming or deleting it would pull the tree out from
+                    // under itself, so it only offers what can be created
+                    // inside it.
+                    let is_root = entry.is_root();
+                    let mut menu = menu;
+
+                    if is_dir {
+                        let sidebar = menu_sidebar.clone();
+                        let directory = path.clone();
+                        menu =
+                            menu.item(PopupMenuItem::new("New File…").on_click(move |_, _, cx| {
+                                let request = SidebarRequest::NewFile {
+                                    directory: directory.clone(),
+                                };
+                                sidebar
+                                    .update(cx, |sidebar, cx| sidebar.request(request, cx))
+                                    .ok();
+                            }));
+                    }
+
+                    if !is_root {
+                        let sidebar = menu_sidebar.clone();
+                        let target = path.clone();
+                        menu =
+                            menu.item(PopupMenuItem::new("Rename…").on_click(move |_, _, cx| {
+                                let request = SidebarRequest::Rename {
+                                    path: target.clone(),
+                                };
+                                sidebar
+                                    .update(cx, |sidebar, cx| sidebar.request(request, cx))
+                                    .ok();
+                            }));
+
+                        // Directories are not offered for deletion: the tree
+                        // lists Markdown files, but a directory holds
+                        // everything else in the project too, and there is no
+                        // undo. Files go through a confirmation either way.
+                        if !is_dir {
+                            let sidebar = menu_sidebar.clone();
+                            let target = path.clone();
+                            menu = menu.separator().item(PopupMenuItem::new("Delete").on_click(
+                                move |_, _, cx| {
+                                    let request = SidebarRequest::DeleteFile {
+                                        path: target.clone(),
+                                    };
+                                    sidebar
+                                        .update(cx, |sidebar, cx| sidebar.request(request, cx))
+                                        .ok();
+                                },
+                            ));
+                        }
+                    }
+
+                    // Not a request: showing a file in the platform's file
+                    // manager changes nothing and needs no tab to agree.
+                    let reveal = path;
+                    menu.separator()
+                        .item(
+                            PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| {
+                                cx.reveal_path(&reveal);
+                            }),
+                        )
+                }),
+            )
             .into_any_element()
     }
 }
@@ -340,15 +438,6 @@ fn name_key(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_lowercase())
         .unwrap_or_default()
-}
-
-fn is_markdown(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            let extension = extension.to_lowercase();
-            MARKDOWN_EXTENSIONS.contains(&extension.as_str())
-        })
 }
 
 #[cfg(test)]
