@@ -1,0 +1,106 @@
+name: CI
+
+# Every push to the default branch and every pull request. Tag builds live in
+# `release.yml`, which is the only workflow that produces artifacts.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A branch that gets two pushes in a row only needs the second one checked, so
+# the superseded run is cancelled rather than left to burn a runner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # gpui-kit pulls part of its dependency tree over git. The libgit2 backend
+  # flakes on CI runners, so shell out to the system `git` instead.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_TERM_COLOR: always
+  # Note there is no RUSTUP_TOOLCHAIN here on purpose: it would override
+  # rust-toolchain.toml, which is the one place the version is meant to live.
+  # Cargo.lock is committed and every command below passes `--locked`, so CI
+  # builds exactly what was reviewed instead of quietly resolving newer deps.
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          components: rustfmt
+      # Formatting needs no compiler and no system libraries, so this job skips
+      # the apt step and finishes in seconds.
+      - run: cargo fmt --all -- --check
+
+  test:
+    name: test · ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the other two.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux
+            # 22.04, not `ubuntu-latest`: latest is 24.04 with glibc 2.39, and a
+            # binary built there will not run on Debian 12 or Ubuntu 22.04.
+            # Production targets decide the build host, not the other way round.
+            jobs: "2"
+          - os: macos-latest
+            name: macOS arm64
+            # ~3 vCPU / 7 GB. Left unbounded, a full GPUI link step runs the
+            # runner out of memory.
+            jobs: "2"
+          - os: windows-latest
+            name: windows
+            jobs: "4"
+    env:
+      CARGO_BUILD_JOBS: ${{ matrix.jobs }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # GPUI's Linux backend links X11, Wayland, Vulkan, fontconfig and OpenSSL.
+      # None of this is needed to *run* the tests — they use GPUI's headless
+      # test platform — but all of it is needed to link the test binary.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-xcb-dev \
+            libfontconfig1-dev libvulkan-dev \
+            libssl-dev libsecret-1-dev libzstd-dev
+
+      # `--` flags apply to the workspace's own crates only, never to
+      # dependencies, so a warning inside gpui-kit cannot fail this step.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # md-core is pure Rust: its tests need no Xcode, no Metal and no display.
+      # md-app's run headless through GPUI's test support.
+      - name: Test
+        run: cargo test --workspace --locked
+
+  # There is deliberately no separate `build` job. `cargo test` already compiles
+  # every crate on every platform, and the app cannot be launched here anyway —
+  # a runner has no display server and no GPU. Release-only concerns (thin LTO
+  # under a memory-capped runner, Windows needing `fxc.exe` on PATH) are real,
+  # but they are the business of `release.yml`, which is where they will surface.
