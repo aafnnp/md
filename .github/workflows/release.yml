@@ -114,9 +114,11 @@ jobs:
         run: cargo install cargo-packager --locked --version 0.11.8
 
       - name: Package
-        # Run from the repository root: `icons` and every other path in
-        # `[package.metadata.packager]` is read relative to the working
-        # directory, and `cargo packager` does no canonicalising of its own.
+        # Which directory this runs from does not matter: the packager changes
+        # to the directory of the Cargo.toml that carried the metadata, so the
+        # paths in `[package.metadata.packager]` are relative to that file, not
+        # to the caller. Running it from the root works, but not for the reason
+        # the config's `../../assets` might suggest.
         run: cargo packager --release --formats ${{ matrix.formats }}
 
       # `upload-artifact` does not preserve file modes or the symlinks inside a
