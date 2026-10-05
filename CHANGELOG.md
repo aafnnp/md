@@ -1,0 +1,67 @@
+# Changelog
+
+Notable changes to `md`, newest first. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to follow
+[semantic versioning](https://semver.org/spec/v2.0.0.html) from `0.1.0` onward.
+
+A version's section here is not a summary written after the fact — it is the release notes.
+`scripts/changelog.sh` lifts the section for the tag being pushed, and the release job refuses to
+publish a version that has no section. See [Releasing](#releasing) at the bottom.
+
+## [Unreleased]
+
+## [0.1.0] - 2026-10-05
+
+The first release. An editor with two panes — Markdown source on the left, rendered output on the
+right, updating as you type — packaged for macOS, Windows and Linux.
+
+### Added
+
+- **The workspace.** A sidebar, an editor pane and a preview pane, separated by draggable
+  dividers, with the preview re-rendering after a short pause rather than on every keystroke.
+- **Editing.** A source editor with syntax highlighting, and keys for the things you would expect:
+  <kbd>Cmd</kbd>+<kbd>S</kbd>, <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd>,
+  <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd>, <kbd>Cmd</kbd>+<kbd>W</kbd>,
+  <kbd>Cmd</kbd>+<kbd>Q</kbd> and <kbd>Cmd</kbd>+<kbd>1</kbd>–<kbd>Cmd</kbd>+<kbd>9</kbd>.
+- **Tabs.** Several documents open at once, each with a dot while it has unsaved changes, and a
+  confirmation before closing one that is not saved.
+- **Saving.** Save, save-as, and an overwrite prompt that has to be answered twice. Saving over a
+  file a second tab is showing is refused outright, because two tabs writing one file means each
+  save silently undoes the other.
+- **A file tree.** Open a folder, expand it, and create, rename or delete files from it.
+- **Markdown.** CommonMark and GFM — tables, task lists, strikethrough, images — parsed by the same
+  `markdown` crate in the preview and in an export, so the two cannot disagree.
+- **Images.** A relative `![](diagram.png)` resolves against the folder the document is in, with
+  percent-encoding, fragments and queries handled, and URLs that already mean something
+  (`https:`, `data:`, an absolute path) passed through untouched.
+- **HTML export.** A complete standalone page with a stylesheet covering light and dark, an
+  explicit UTF-8 declaration, and no network requests. Raw HTML in the source is escaped rather
+  than emitted.
+- **Themes.** System, light and dark, with fonts, sizes and editor width, persisted as JSON in the
+  platform's per-user configuration directory.
+- **Packaging.** Tagged pushes build a `.dmg` for Apple silicon and one for Intel, a `.deb` and an
+  `.AppImage` for Linux, and an NSIS `.exe` for Windows, and attach all five to a draft release.
+
+### Known limitations
+
+- Builds are unsigned, so macOS and Windows both warn on first launch. See *Installing a release* in
+  the README.
+- Task-list checkboxes render but cannot be clicked: `gpui-base` draws them as an inert `div`.
+- A `.AppImage` built for `x86_64` cannot be started on an Apple silicon machine to check it, so
+  that artifact ships having been built and listed but never run.
+
+[Unreleased]: https://github.com/aafnnp/md/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/aafnnp/md/releases/tag/v0.1.0
+
+## Releasing
+
+1. Move what is under `## [Unreleased]` into a new `## [x.y.z] - YYYY-MM-DD` section, and bump
+   `version` in the workspace `Cargo.toml`.
+2. Update the two compare links at the bottom: the new version points at its tag, and `Unreleased`
+   compares from it.
+3. Commit, then `git tag vX.Y.Z && git push origin master vX.Y.Z`.
+
+The release job runs `scripts/changelog.sh X.Y.Z` and fails before anything is published if there is
+no such section, so step 1 cannot be skipped by accident. CI runs the same script against the
+version in `Cargo.toml` on every push, which catches the other order of the same mistake —
+bumping the version and forgetting the changelog.

@@ -155,6 +155,9 @@ know about.
 - **clippy** — `cargo clippy --workspace --all-targets --locked -- -D warnings`.
 - **test** — `cargo test --workspace --locked` on Linux, macOS and Windows, with `fail-fast` off so
   one platform failing does not hide the other two.
+- **changelog** — `scripts/changelog.sh --current`, which fails if the version in `Cargo.toml` has
+  no section in `CHANGELOG.md`. The release workflow runs the same script for the tag it is
+  publishing, so a version cannot be released without one either.
 
 `--locked` everywhere, because `Cargo.lock` is committed and a GPUI bump is meant to be a deliberate
 change rather than something a fresh resolve decides. There is deliberately no `build` job: `cargo
@@ -180,6 +183,13 @@ Linux builds are pinned to `ubuntu-22.04` (glibc 2.35) rather than `ubuntu-lates
 Each is a tagged commit built with `--locked`, packaged by a pinned `cargo-packager 0.11.8`, and
 attached to a **draft** release. Nothing is public until someone reads that page and publishes it,
 which is the one step here that is deliberately not automatic.
+
+The release notes are the tagged version's section of `CHANGELOG.md`, lifted out by
+`scripts/changelog.sh` and handed to the release step as the body. They are written by a person
+rather than generated from the commits, because the history here is prose — `Refuse a rooted image
+URL on Windows too`, not `fix: reject rooted paths` — and there are no pull requests or labels to
+group. A tag whose version has no section fails the job before the release is created, so the page
+can never come out empty. [CHANGELOG.md](CHANGELOG.md) ends with the steps for cutting a release.
 
 Two macOS builds rather than one universal binary: a universal build needs a `lipo` merge step on
 top of two compiles, and shipping both architectures is a smaller thing to get right. The macOS
@@ -240,6 +250,9 @@ assets/
   icon.png      the 512, and the one the Linux packagers take as the app icon
   icon@2x.png   the 1024, which an `.icns` holds only as 512 at 2x
   icon.ico      used as-is — nothing here generates one
+scripts/
+  changelog.sh  lifts one version's section out of the changelog
+CHANGELOG.md   what each version changed — the release notes, not a summary of them
 .github/workflows/
   ci.yml       fmt, clippy and tests on every push and pull request
   release.yml  the four-platform package build, on a version tag

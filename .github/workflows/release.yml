@@ -187,6 +187,34 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
+      # Checked out because the release notes come from the changelog in the
+      # tagged tree — not from the default branch, which may already have moved
+      # on to the next version's entry. Whatever the tag pointed at is what the
+      # notes describe.
+      - uses: actions/checkout@v5
+
+      # This is the gate as much as it is the notes. A version whose section is
+      # missing fails here, before the release exists, rather than publishing a
+      # page that says nothing about what changed.
+      - name: Take the notes from the changelog
+        run: |
+          set -euo pipefail
+          scripts/changelog.sh "${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/notes.md"
+          cat >> "$RUNNER_TEMP/notes.md" <<'FOOTER'
+
+          ---
+
+          Unsigned builds. See **Installing a release** in the README for what each platform will say the first time you open one.
+
+          | Platform | Download |
+          |---|---|
+          | macOS (Apple silicon) | `*_aarch64.dmg` |
+          | macOS (Intel) | `*_x64.dmg` |
+          | Windows | `*_x64-setup.exe` |
+          | Linux (Debian/Ubuntu) | `*.deb` |
+          | Linux (any) | `*.AppImage` |
+          FOOTER
+
       # `merge-multiple` flattens the four artifact directories into one; their
       # names are unique per platform, so nothing collides.
       - uses: actions/download-artifact@v6
@@ -201,14 +229,6 @@ jobs:
           # attached either way; the difference is that a person reads the page
           # before the world does. Publishing is one click.
           draft: true
-          body: |
-            Unsigned builds. See **Installing a release** in the README for what
-            each platform will say the first time you open one.
-
-            | Platform | Download |
-            |---|---|
-            | macOS (Apple silicon) | `*_aarch64.dmg` |
-            | macOS (Intel) | `*_x64.dmg` |
-            | Windows | `*_x64-setup.exe` |
-            | Linux (Debian/Ubuntu) | `*.deb` |
-            | Linux (any) | `*.AppImage` |
+          # `body_path`, not `body`: the notes are generated above so that the
+          # section a person wrote in CHANGELOG.md is what the page shows.
+          body_path: ${{ runner.temp }}/notes.md

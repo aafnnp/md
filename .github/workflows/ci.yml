@@ -41,6 +41,18 @@ jobs:
       # the apt step and finishes in seconds.
       - run: cargo fmt --all -- --check
 
+  # A released version has to have an entry in CHANGELOG.md, because the entry
+  # is the release notes rather than a summary kept beside them. This half of
+  # the guard catches the version bumped without the entry written, in the same
+  # pull request. The other half — a tag pushed for a version never written up
+  # — is in `release.yml`, where the mistake would otherwise ship.
+  changelog:
+    name: changelog
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: ./scripts/changelog.sh --current > /dev/null
+
   test:
     name: test · ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
