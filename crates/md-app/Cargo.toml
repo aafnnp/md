@@ -21,3 +21,60 @@ md-core = { workspace = true }
 # `cargo build` output.
 [dev-dependencies]
 gpui-kit = { version = "0.7.1", features = ["test-support"] }
+
+# Configuration for `cargo packager`. It lives in Cargo.toml rather than in a
+# `Packager.toml` beside it because the Cargo-metadata path is the one that fills
+# in the version, the binary directory and the output directory from the
+# workspace; a plain config file supplies only the name and would need all of
+# that spelled out by hand. `--config` is worse still — it makes the packager
+# ignore `--release` along with it, so a release build would be packaged from the
+# debug profile.
+#
+# Every path here is read relative to *this* file's directory — cargo packager
+# chdirs to it before packaging — which is why the icons below climb out with
+# `../..` rather than being written the way the repository root reads:
+#
+#     cargo build --release --locked -p md-app
+#     cargo packager --release --formats app,dmg
+[package.metadata.packager]
+# Without these two the packager derives them from the package, which would name
+# the app `md-app`. The identifier is not cosmetic: it is the directory the app
+# already reads its settings from, so changing it moves everyone's settings.
+product-name = "md"
+identifier = "dev.aafnnp.md"
+category = "Productivity"
+# The sizes an `.icns` is able to hold, drawn natively rather than downsampled.
+# macOS builds its `.icns` from these, and the Linux packagers install them into
+# the hicolor theme, so the list is shared. `icon@2x.png` is 1024 because 1024
+# exists in an `.icns` only as 512 at 2x, and the name is how the density is
+# communicated; a 1024 named without that suffix is refused outright. A pattern
+# that matches nothing is not an error either — it is silently no icons at all.
+icons = [
+    "../../assets/icon-16.png",
+    "../../assets/icon-32.png",
+    "../../assets/icon-128.png",
+    "../../assets/icon-256.png",
+    "../../assets/icon.png",
+    "../../assets/icon@2x.png",
+]
+
+[package.metadata.packager.macos]
+# Ad-hoc signing. With no signature at all macOS reports the app as *damaged* and
+# the only way past it is `xattr -cr`; ad-hoc signing gets it reclassified as
+# being from an unidentified developer, which System Settings can override. `"-"`
+# is how `codesign` spells ad-hoc, and it costs the build nothing — no
+# certificate to look up, and `--timestamp` is a no-op without one.
+signing-identity = "-"
+# What the binary is actually linked against, per `otool -l`: `minos 11.0`.
+minimum-system-version = "11.0"
+
+[package.metadata.packager.nsis]
+# The default, written down because the default is the considered choice: a
+# per-user install needs no Administrator rights, which is the right thing to ask
+# of someone installing an app that carries no signature.
+installer-mode = "currentUser"
+# The `.ico` is named here rather than in `icons` above, because nothing in this
+# build reads a Windows icon out of that list: `find_ico` belongs to the wix
+# backend, which this does not use, and NSIS takes the installer's icon from
+# this field. Setting it is what stops Setup.exe wearing NSIS's own icon.
+installer-icon = "../../assets/icon.ico"

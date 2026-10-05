@@ -5,10 +5,10 @@ framework from Zed, using the [gpui-kit](https://github.com/longbridge/gpui-kit)
 
 Two panes: write Markdown on the left, see it rendered on the right, live as you type.
 
-> **Status: early.** M0–M4 are done, apart from clickable task-list checkboxes (see
+> **Status: early.** M0–M5 are done, apart from clickable task-list checkboxes (see
 > [Known gaps](#known-gaps)). The editor opens, edits, renders, saves and exports Markdown in two
 > panes, keeps tabs and a file tree, resolves images relative to the document, and remembers its
-> theme. Packaging and tagged releases are still missing — see [Roadmap](#roadmap).
+> theme. Tagged pushes are packaged for macOS, Windows and Linux — see [Releases](#releases).
 
 ## Stack
 
@@ -166,6 +166,55 @@ they will actually surface.
 Linux builds are pinned to `ubuntu-22.04` (glibc 2.35) rather than `ubuntu-latest` (24.04, glibc
 2.39): a binary built against the newer glibc will not run on Debian 12 or Ubuntu 22.04.
 
+## Releases
+
+`.github/workflows/release.yml` runs on a `v*` tag. Four runners build in parallel:
+
+| Runner | Package |
+|---|---|
+| `macos-latest` (Apple silicon) | `md_0.1.0_aarch64.dmg` |
+| `macos-15-intel` (Intel) | `md_0.1.0_x64.dmg` |
+| `ubuntu-22.04` | `md_0.1.0_amd64.deb`, `md_0.1.0_x86_64.AppImage` |
+| `windows-latest` | `md_0.1.0_x64-setup.exe` |
+
+Each is a tagged commit built with `--locked`, packaged by a pinned `cargo-packager 0.11.8`, and
+attached to a **draft** release. Nothing is public until someone reads that page and publishes it,
+which is the one step here that is deliberately not automatic.
+
+Two macOS builds rather than one universal binary: a universal build needs a `lipo` merge step on
+top of two compiles, and shipping both architectures is a smaller thing to get right. The macOS
+package is a `.dmg` and the Windows one is an NSIS installer — the `.app` bundle itself is not
+published separately, because `upload-artifact` does not preserve the file modes and symlinks
+inside one and it would arrive unsigned. The `.dmg` wraps the same bundle.
+
+The workflow also takes `workflow_dispatch`, which runs the whole matrix without publishing
+anything — useful for changing this file without spending a version number on finding out whether
+it worked. The publish job is gated on the ref actually being a tag.
+
+Packaging is configured in `crates/md-app/Cargo.toml` under `[package.metadata.packager]` rather
+than in a `Packager.toml` beside it, because the Cargo-metadata path is the one that fills in the
+version, the binary directory and the output directory from the workspace. Paths in that config are
+read relative to *that file's* directory — `cargo packager` changes directory to it before
+packaging — which is why the `icons` list there climbs back out with `../..`:
+
+```sh
+cargo build --release --locked -p md-app
+cargo packager --release --formats dmg
+```
+
+Two things about that config are worth knowing before editing it, because neither failure announces
+itself. A pattern in `icons` that matches nothing is not an error — it is silently no icon at all,
+and the app ships with a blank one. And an `.icns` cannot hold a 1024-pixel image under its own
+name: at that size the format has only "512 at 2x", so the file has to be called `icon@2x.png`. The
+name is how the density is communicated, and a 1024 named any other way is refused outright.
+
+`assets/make-icon.py` draws every one of those, needing nothing but the standard library. Each size
+is rasterised at its own resolution rather than scaled down from one master, because the 16- and
+32-pixel entries fall back to a simpler mark — the M is an illegible smudge at that size — and a
+downsampled copy would never reach the branch that knows it. It writes `assets/icon.ico` as well,
+since nothing here generates one, and that is what the NSIS installer wears. All of it is checked
+in, so a build never has to run Python.
+
 ## Installing a release
 
 Release builds are **unsigned**. That has real consequences:
@@ -184,9 +233,16 @@ Release builds are **unsigned**. That has real consequences:
 ```
 crates/
   md-core/     pure logic: documents, file I/O, settings, image resolution, export — no GPUI
-  md-app/      the `md` binary: GPUI views and layout
+  md-app/      the `md` binary: GPUI views and layout, and the packaging config
+assets/
+  make-icon.py  draws every icon below; only the standard library
+  icon-16.png   also icon-32, icon-128 and icon-256 — one per size an `.icns`
+  icon.png      the 512, and the one the Linux packagers take as the app icon
+  icon@2x.png   the 1024, which an `.icns` holds only as 512 at 2x
+  icon.ico      used as-is — nothing here generates one
 .github/workflows/
   ci.yml       fmt, clippy and tests on every push and pull request
+  release.yml  the four-platform package build, on a version tag
 ```
 
 ## Roadmap
@@ -196,9 +252,9 @@ crates/
 - [x] **M2** — tabs, file tree sidebar, unsaved-close confirmation
 - [x] **M3** — light/dark themes, persisted settings
 - [x] **M4** — GFM tables, images, HTML export
+- [x] **M5** — packaging and tag-triggered multi-platform release
 - [ ] **M4** — clickable task-list checkboxes (see [Known gaps](#known-gaps)), and inserting
       `![]()` by dropping an image onto the editor
-- [ ] **M5** — packaging and tag-triggered multi-platform release
 - [x] **Save** — <kbd>Cmd</kbd>+<kbd>S</kbd> / <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd>, with
       an overwrite confirmation and a guard against two tabs over one file
 - [ ] **Next** — a settings panel instead of a hand-edited file, open file… alongside open folder…,
