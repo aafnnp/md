@@ -1,5 +1,7 @@
 //! The root view: a tab strip over `sidebar | active tab`.
 
+use std::io;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui_kit::base::{h_resizable, resizable_panel};
@@ -11,7 +13,7 @@ use gpui_kit::*;
 use md_core::Document;
 
 use crate::actions::{CloseTab, Quit, SelectTab};
-use crate::sidebar::Sidebar;
+use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::tab::Tab;
 
 const STARTER_DOCUMENT: &str = "\
@@ -41,16 +43,33 @@ pub struct Workspace {
     /// Source of `Tab` ids. Never reused, so a closed tab's splitter layout
     /// cannot leak into the tab that takes its place.
     next_tab_id: u64,
+    /// Dropping a `Subscription` cancels it, so this has to be held: a
+    /// subscription created and discarded would leave the tree's rows opening
+    /// nothing at all.
+    _sidebar_events: Subscription,
 }
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let sidebar = cx.new(|_| Sidebar);
+        let sidebar = cx.new(Sidebar::new);
+        // `subscribe_in` rather than `subscribe`: opening a file from the tree
+        // has to focus the new tab's editor, and only the `_in` form hands the
+        // callback a window to focus into.
+        let _sidebar_events = cx.subscribe_in(
+            &sidebar,
+            window,
+            |this, _, event: &SidebarEvent, window, cx| {
+                let SidebarEvent::Open(path) = event;
+                this.open_path(path.clone(), window, cx);
+            },
+        );
+
         let mut workspace = Self {
             tabs: Vec::new(),
             active: 0,
             sidebar,
             next_tab_id: 0,
+            _sidebar_events,
         };
 
         let mut starter = Document::new();
@@ -68,6 +87,28 @@ impl Workspace {
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         cx.notify();
+    }
+
+    /// Open the file at `path`, focusing it if a tab already shows it.
+    ///
+    /// The sidebar's tree is re-read from disk, so it can offer a row for a
+    /// file that has since been removed or made unreadable; that failure is
+    /// reported rather than silently swallowed, which would look like the click
+    /// had been ignored.
+    pub fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let already_open = self
+            .tabs
+            .iter()
+            .position(|tab| tab.read(cx).path() == Some(path.as_path()));
+        if let Some(index) = already_open {
+            self.select(index, cx);
+            return;
+        }
+
+        match Document::open(&path) {
+            Ok(document) => self.open(document, window, cx),
+            Err(error) => report_open_failure(&path, &error, window, cx),
+        }
     }
 
     /// Close the active tab, asking first when it has unsaved edits.
@@ -222,6 +263,27 @@ impl Workspace {
             .child(resizable_panel().child(tab.clone()))
             .into_any_element()
     }
+}
+
+/// Tell the user a file could not be opened.
+///
+/// A free function because it needs nothing from the workspace: the dialog is
+/// owned by the window, and by the time this runs the tab was never created.
+fn report_open_failure(path: &Path, error: &io::Error, window: &mut Window, cx: &mut App) {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let message = format!("{name}\n\n{error}");
+
+    // `AlertDialog` already offers an OK button and no cancel, so this needs
+    // neither `.confirm()` nor `.show_cancel(false)`.
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        alert
+            .title("Could not open file")
+            .description(message.clone())
+            .ok_text("OK")
+    });
 }
 
 impl Render for Workspace {
@@ -443,5 +505,51 @@ mod tests {
             .unwrap();
         assert_eq!(titles(cx, &workspace), ["Untitled"]);
         assert!(workspace.read_with(cx, |workspace, cx| workspace.tabs[0].read(cx).is_dirty()));
+    }
+
+    /// Opening a file from the sidebar adds a tab; opening it a second time
+    /// brings its tab forward instead of opening the same file twice.
+    #[gpui_kit::test]
+    fn opening_a_file_from_the_sidebar_uses_one_tab(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("sidebar-open");
+        let path = dir.join("from-tree.md");
+        std::fs::write(&path, "# hello").unwrap();
+
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(path.clone(), cx));
+
+        assert_eq!(titles(cx, &workspace), ["Untitled", "from-tree.md"]);
+        assert_eq!(active(&workspace, cx), 1, "the opened file is focused");
+
+        // Move away, then ask for the same file again: the sidebar's request is
+        // what is being tested, so it must not depend on which tab is active.
+        dispatch(window, SelectTab(0), cx);
+        sidebar.update(cx, |sidebar, cx| sidebar.open(path.clone(), cx));
+
+        assert_eq!(
+            titles(cx, &workspace),
+            ["Untitled", "from-tree.md"],
+            "a file already open must not be opened a second time"
+        );
+        assert_eq!(active(&workspace, cx), 1, "its existing tab comes forward");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A tree row for a file that is gone reports the failure instead of doing
+    /// nothing, which would read as a click that was ignored.
+    #[gpui_kit::test]
+    fn opening_a_missing_file_is_reported(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("sidebar-missing");
+
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(dir.join("gone.md"), cx));
+
+        assert_eq!(titles(cx, &workspace), ["Untitled"], "no tab was opened");
+        assert!(has_dialog(window, cx), "the failure should be on screen");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

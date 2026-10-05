@@ -1,5 +1,6 @@
 //! One open document: its source pane and the preview beside it.
 
+use std::path::Path;
 use std::time::Duration;
 
 use gpui_kit::base::{h_resizable, resizable_panel};
@@ -79,6 +80,14 @@ impl Tab {
     /// Whether the buffer has edits that are not on disk.
     pub fn is_dirty(&self) -> bool {
         self.document.is_dirty()
+    }
+
+    /// The file this tab is editing, if it was opened from or saved to one.
+    ///
+    /// A tab with no path is an untitled buffer, and cannot be the tab that
+    /// already shows a file the sidebar is asking to open.
+    pub fn path(&self) -> Option<&Path> {
+        self.document.path()
     }
 
     /// The buffer as the editor currently holds it.
