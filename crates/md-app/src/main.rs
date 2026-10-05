@@ -1,32 +1,34 @@
 //! `md` — a GPUI desktop Markdown editor.
-//!
-//! M0 smoke test: prove that `gpui-kit` can open a window on this machine.
-//! This is the go/no-go gate for the whole GPUI stack — if this does not come
-//! up, the architecture in the plan has to be reconsidered before M1 starts.
+
+mod actions;
+mod editor;
+mod preview;
+mod sidebar;
+mod workspace;
 
 use gpui_kit::*;
 
-struct Hello;
-
-impl Render for Hello {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .child("md")
-            .child("GPUI is up.")
-    }
-}
+use crate::actions::Quit;
+use crate::workspace::Workspace;
 
 fn main() {
-    gpui_kit::application().run(|cx| {
-        gpui_kit::init(cx);
-        gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| Hello))
+    let window_options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: Point::default(),
+            size: size(px(1200.), px(820.)),
+        })),
+        ..Default::default()
+    };
+
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+            gpui_kit::open_window(window_options, cx, |window, cx| {
+                cx.new(|cx| Workspace::new(window, cx))
+            })
             .expect("failed to open window");
-        cx.activate(true);
-    });
+            cx.activate(true);
+        });
 }

@@ -5,5 +5,7 @@
 //! server, which is what makes the logic here actually testable.
 
 pub mod document;
+pub mod recent;
 
 pub use document::Document;
+pub use recent::RecentFiles;

@@ -15,3 +15,9 @@ path = "src/main.rs"
 [dependencies]
 gpui-kit = "0.7.1"
 md-core = { workspace = true }
+
+# `test-support` turns on GPUI's headless renderer so the workspace tests can
+# drive a real window. Under resolver v3 this feature stays out of normal
+# `cargo build` output.
+[dev-dependencies]
+gpui-kit = { version = "0.7.1", features = ["test-support"] }
