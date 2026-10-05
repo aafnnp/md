@@ -103,6 +103,20 @@ jobs:
           if (-not $fxc) { throw "fxc.exe not found in the Windows SDK" }
           "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
 
+      # `create-dmg` mounts the image it is building at /Volumes/<name>, and the
+      # indexer starts on that volume the moment it appears. The detach at the
+      # end then loses the race and reports `Resource busy` — after the app has
+      # already been copied in and the permissions already fixed, so the image
+      # is fine and only the unmount failed. Turning indexing off removes the
+      # thing it is racing.
+      - name: Quiet Spotlight
+        if: runner.os == 'macOS'
+        # Best-effort: this narrows the race rather than closing it, and the
+        # retry below is what actually makes the step reliable. Failing the job
+        # over a mitigation that may not even be permitted would be the wrong
+        # trade.
+        run: sudo mdutil -a -i off || true
+
       # cargo-packager packages a binary; it does not build one. `--locked`, like
       # everywhere else, so a release is the commit that was reviewed.
       - name: Build
@@ -119,7 +133,26 @@ jobs:
         # paths in `[package.metadata.packager]` are relative to that file, not
         # to the caller. Running it from the root works, but not for the reason
         # the config's `../../assets` might suggest.
-        run: cargo packager --release --formats ${{ matrix.formats }}
+        #
+        # Retried, because the one step here that is not deterministic is the
+        # unmount of a `.dmg`, and it has been seen to fail — on a runner and on
+        # a laptop alike — while leaving nothing else behind. The stale mount and
+        # the half-written image are what the next attempt trips over, so they
+        # are cleared before retrying rather than after.
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if command -v hdiutil >/dev/null; then
+              hdiutil detach /Volumes/md -force 2>/dev/null || true
+            fi
+            rm -f target/release/rw.*.dmg
+            if cargo packager --release --formats ${{ matrix.formats }}; then
+              exit 0
+            fi
+            echo "::warning::packaging attempt $attempt failed"
+          done
+          echo "::error::cargo packager failed three times for '${{ matrix.formats }}'"
+          exit 1
 
       # `upload-artifact` does not preserve file modes or the symlinks inside a
       # bundle, so an `.app` uploaded on its own arrives unsigned and unusable.
