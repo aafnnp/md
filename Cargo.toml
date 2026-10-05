@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/md-core", "crates/md-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["aafnnp"]
+repository = "https://github.com/aafnnp/md"
+rust-version = "1.95"
+
+[workspace.dependencies]
+md-core = { path = "crates/md-core" }
+
+# Release profile tuned for the memory-constrained macOS arm64 CI runner
+# (~7 GB RAM): thin LTO + explicit codegen-units keeps the link step from OOMing.
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 16
+
+[profile.dev]
+codegen-units = 16

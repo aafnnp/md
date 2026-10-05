@@ -1,0 +1,17 @@
+[package]
+name = "md-app"
+description = "GPUI desktop Markdown editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "md"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit = "0.7.1"
+md-core = { workspace = true }
