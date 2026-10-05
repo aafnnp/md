@@ -16,6 +16,13 @@ pub struct EditorPane {
 
 impl EditorPane {
     pub fn new(initial: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // `EditorState::new` builds the state in the library's code-editor mode,
+        // and that mode turns searching on — which is the whole of the app's
+        // find and replace. `Cmd+F` and `Cmd+Shift+F` are bound by the library
+        // against the `"Input"` key context this state carries, and the bar is
+        // drawn by `Editor` below, so there is nothing to wire up here. Verified
+        // by the two tests in `tab.rs`; this note is so the behaviour does not
+        // look like an accident that could be tidied away.
         Self {
             state: cx.new(|cx| EditorState::new(window, cx).default_value(initial)),
         }

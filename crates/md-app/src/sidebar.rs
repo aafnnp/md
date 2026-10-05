@@ -12,11 +12,14 @@ use std::rc::Rc;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::PopupMenuItem;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tree::{self, TreeEvent, TreeItem, TreeState};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 
 use md_core::fs::is_markdown;
+
+use crate::actions::OpenFile;
 
 /// Something the tree's context menu asks for.
 ///
@@ -66,6 +69,12 @@ pub struct Sidebar {
     /// through an `Rc` because the render callback is `'static` and re-runs on
     /// every frame.
     directories: Rc<HashSet<String>>,
+    /// The files opened most recently, newest first.
+    ///
+    /// Told to the sidebar rather than read from disk here. The workspace is
+    /// what opens files, so it is what knows this list has changed, and it is
+    /// the only thing that writes the file this mirrors.
+    recents: Vec<PathBuf>,
     _tree_events: Subscription,
 }
 
@@ -98,6 +107,7 @@ impl Sidebar {
             tree,
             expanded: HashSet::new(),
             directories: Rc::new(HashSet::new()),
+            recents: Vec::new(),
             _tree_events,
         }
     }
@@ -114,6 +124,25 @@ impl Sidebar {
     /// Ask the owner to carry out a context-menu request.
     fn request(&mut self, request: SidebarRequest, cx: &mut Context<Self>) {
         cx.emit(SidebarEvent::Request(request));
+    }
+
+    /// Show `recents` as the list of last-opened files, newest first.
+    ///
+    /// Replaces whatever was shown rather than being merged with it: the caller
+    /// holds the whole list, and a sidebar that added to it would grow entries
+    /// the file it mirrors does not have.
+    pub(crate) fn set_recents(&mut self, recents: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.recents = recents;
+        cx.notify();
+    }
+
+    /// The recents the sidebar is showing.
+    ///
+    /// Read back by the workspace's tests, which is where the wiring from an
+    /// opened file to this list is checked.
+    #[cfg(test)]
+    pub(crate) fn recents(&self) -> &[PathBuf] {
+        &self.recents
     }
 
     /// Re-read the folder from disk.
@@ -270,23 +299,36 @@ impl Sidebar {
             .border_color(cx.theme().border)
             .child(div().truncate().text_sm().child(name))
             .child(
-                Button::new("open-folder")
-                    .icon(IconName::FolderOpen)
-                    .label("Open")
-                    .compact()
-                    .on_click(cx.listener(|this, _, window, cx| this.pick_folder(window, cx))),
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .child(
+                        // Dispatched as an action rather than handled here, so
+                        // the sidebar and the key binding go down one path: the
+                        // window's key map hands `Cmd+O` to the same handler
+                        // the click does.
+                        Button::new("open-file")
+                            .icon(IconName::FileText)
+                            .compact()
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(OpenFile), cx)
+                            }),
+                    )
+                    .child(
+                        Button::new("open-folder")
+                            .icon(IconName::FolderOpen)
+                            .label("Open")
+                            .compact()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.pick_folder(window, cx)),
+                            ),
+                    ),
             )
     }
 
     fn render_tree(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.root.is_none() {
-            return div()
-                .flex_1()
-                .p_4()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("Open a folder to see its Markdown files.")
-                .into_any_element();
+            return self.render_recents(cx);
         }
 
         // Two weak handles rather than one: each closure below captures by
@@ -407,6 +449,74 @@ impl Sidebar {
             )
             .into_any_element()
     }
+
+    /// What the sidebar shows before a folder is opened: the files that were
+    /// opened last, so returning to a document is one click rather than a trip
+    /// through the file dialog.
+    ///
+    /// Each row carries its folder, because the list is mostly the same few
+    /// names — `notes.md` in two projects is otherwise two identical rows.
+    fn render_recents(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        if self.recents.is_empty() {
+            return div()
+                .flex_1()
+                .p_4()
+                .text_sm()
+                .text_color(muted)
+                .child("Open a folder to see its Markdown files, or a file to start writing.")
+                .into_any_element();
+        }
+
+        let mut list = v_flex()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .gap_1()
+            .p_2()
+            .child(
+                div()
+                    .px_1()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("Recent files"),
+            );
+
+        for path in &self.recents {
+            let sidebar = cx.weak_entity();
+            let opened = path.clone();
+            list = list.child(
+                ListItem::new(path_id(path))
+                    // The row shows the file name; the full path is what it
+                    // announces, since that is what tells two files apart.
+                    .accessibility_label(path.to_string_lossy().into_owned())
+                    .child(
+                        v_flex()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(Icon::new(IconName::FileText).xsmall().text_color(muted))
+                                    .child(display_name(path)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .truncate()
+                                    .child(folder_label(path)),
+                            ),
+                    )
+                    .on_click(move |_, _, cx| {
+                        sidebar
+                            .update(cx, |sidebar, cx| sidebar.open(opened.clone(), cx))
+                            .ok();
+                    }),
+            );
+        }
+
+        list.into_any_element()
+    }
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
@@ -440,6 +550,16 @@ fn display_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// The folder a file sits in, as the second line of a recent row.
+///
+/// The whole path, not just the folder's own name: two projects can both have
+/// a `drafts`, and the point of the line is telling them apart.
+fn folder_label(path: &Path) -> String {
+    path.parent()
+        .map(|parent| parent.display().to_string())
+        .unwrap_or_default()
 }
 
 fn name_key(path: &Path) -> String {

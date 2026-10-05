@@ -5,10 +5,11 @@ framework from Zed, using the [gpui-kit](https://github.com/longbridge/gpui-kit)
 
 Two panes: write Markdown on the left, see it rendered on the right, live as you type.
 
-> **Status: early.** M0–M5 are done, apart from clickable task-list checkboxes (see
-> [Known gaps](#known-gaps)). The editor opens, edits, renders, saves and exports Markdown in two
-> panes, keeps tabs and a file tree, resolves images relative to the document, and remembers its
-> theme. Tagged pushes are packaged for macOS, Windows and Linux — see [Releases](#releases).
+> **Status: early.** M0–M5 are done, apart from clickable task-list checkboxes and synchronised
+> scrolling (see [Known gaps](#known-gaps)). The editor opens, edits, finds, renders, saves and
+> exports Markdown in two panes, keeps tabs and a file tree alongside a list of recently opened
+> files, resolves images relative to the document, and remembers its theme. Tagged pushes are
+> packaged for macOS, Windows and Linux — see [Releases](#releases).
 
 ## Stack
 
@@ -69,6 +70,33 @@ way forward.
 A tab's dirty dot clears when its text reaches the disk, and the tab is retargeted by save-as, so the
 next <kbd>Cmd</kbd>+<kbd>S</kbd> writes there rather than asking again.
 
+## Opening files
+
+<kbd>Cmd</kbd>+<kbd>O</kbd> asks the platform for a file and opens it in a tab. It reaches everything
+the sidebar's tree cannot: any file outside the folder that tree is rooted at, and every file at all
+before a folder has been opened.
+
+When no folder is open, the sidebar shows the files opened recently instead, newest first, each row
+naming the folder it sits in — the list is mostly the same few names, and `notes.md` in two projects
+would otherwise be two identical rows. Opening a folder puts the tree back in its place.
+
+Choosing a recent file that has since moved or been deleted says why rather than doing nothing, and
+drops the entry: one that no longer resolves would otherwise be offered every time the sidebar was
+drawn. Renaming or deleting a file from the tree keeps the list in step, so it never points at where
+a file used to be.
+
+The list is `recent.json` in the configuration directory, beside the settings file, and holds the
+twenty most recent paths. Opening a file that is already open still records it — the list is about
+what was opened, not what was new.
+
+## Finding and replacing
+
+<kbd>Cmd</kbd>+<kbd>F</kbd> opens a find bar over the source pane, and
+<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> opens it with the replace field already showing. Both
+come from the editor component: the state it is built from is set to the library's code-editor mode,
+and that mode is what turns searching on, with the shortcuts bound by the library itself. There is
+no find-and-replace code in this repository.
+
 ## Exporting
 
 <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> writes the active tab out as a standalone HTML page. It
@@ -100,9 +128,8 @@ guessed on its behalf: the document's images resolve when the document has somew
 
 ## Known gaps
 
-Two things the plan called for are missing, both for the same reason — the component underneath does
-not offer a way to build them without forking it. They are left out rather than shipped as knobs
-that do nothing.
+Two things the plan called for are missing, both because the component underneath stops short of
+what they need. They are left out rather than shipped as knobs that do nothing.
 
 **Clickable task-list checkboxes.** `- [x]` renders as a checkbox, but clicking it does nothing.
 `gpui-base` draws that checkbox as a static `div` with no id, no click handler and no hook
@@ -112,10 +139,15 @@ plugin that redraws every item, which would look different from every other list
 would stop tracking future fixes upstream. Writing back to the source is a further piece of work on
 top of that.
 
-**Synchronised scrolling.** The plan called for a preview scroll ratio, but `gpui-base`'s
-`TextViewState` keeps its scroll offset private (`scroll_offset` is `pub(super)`) and offers no
-scroll handle, and `EditorState` exposes none at all. The two panes cannot be linked without forking
-the component.
+**Synchronised scrolling.** The preview half is reachable: `TextViewState::list_state()` reports the
+current and maximum scroll, so a position can be read and a position can be set. The source half is
+not. `EditorState` can be *told* and *told about* a scroll offset (`scroll_offset`,
+`set_scroll_offset`), but nothing public reports how far it can scroll, and nothing public reports
+that it scrolled at all — `InputBaseState::on_scroll_wheel` is `pub(super)`. A ratio needs both ends,
+and the one hook that is reachable, `InteractiveElement::on_scroll_wheel`, sees wheel events only: a
+link built on it would quietly come apart the moment either pane was scrolled by keyboard. Left out
+rather than shipped as half a link, and revivable — if a later `gpui-kit` exposes the editor's scroll
+extent, this is a subscription and a division away.
 
 ## Settings
 
@@ -140,12 +172,13 @@ Everything else is a small JSON file in the platform's per-user configuration di
 Every key but `theme` is optional, and leaving one out keeps the built-in default — so a file that
 only says `{"theme": "dark"}` is complete. Values out of range are pulled back into range rather
 than refused, an unreadable file falls back to the defaults, and unknown keys are ignored. Sizes
-outside 8–48 points and widths outside 320–4000 points are clamped. The app writes the file when
-the theme changes; it never rewrites a file it could not parse, so a mistake there is yours to fix
-rather than one the app silently erases.
+outside 8–48 points and widths outside 320–4000 points are clamped.
 
-Setting the theme changes `"theme"` in the file, and writing it drops any key this build does not
-know about.
+The file is written when the theme changes, and that write is the whole of what the app knows: a file
+it could not parse was loaded as the defaults, and a key this build does not recognise was dropped on
+the way in. So the next theme change replaces the file with one holding just the settings this build
+understands. A hand-edit that broke the JSON is therefore not preserved for you to fix — it is
+overwritten. Keep a copy if anything in it mattered.
 
 ## Continuous integration
 
@@ -242,7 +275,7 @@ Release builds are **unsigned**. That has real consequences:
 
 ```
 crates/
-  md-core/     pure logic: documents, file I/O, settings, image resolution, export — no GPUI
+  md-core/     pure logic: documents, file I/O, settings, the recent list, images, export — no GPUI
   md-app/      the `md` binary: GPUI views and layout, and the packaging config
 assets/
   make-icon.py  draws every icon below; only the standard library
@@ -270,8 +303,12 @@ CHANGELOG.md   what each version changed — the release notes, not a summary of
       `![]()` by dropping an image onto the editor
 - [x] **Save** — <kbd>Cmd</kbd>+<kbd>S</kbd> / <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd>, with
       an overwrite confirmation and a guard against two tabs over one file
-- [ ] **Next** — a settings panel instead of a hand-edited file, open file… alongside open folder…,
-      a native menu bar, and using `md-core`'s recent-files list
+- [x] **Find and replace** — <kbd>Cmd</kbd>+<kbd>F</kbd> and
+      <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd>, from the editor component's own search
+- [x] **Open file and recent files** — <kbd>Cmd</kbd>+<kbd>O</kbd>, and the recent list the sidebar
+      shows in place of the tree while no folder is open
+- [ ] **Next** — a settings panel instead of a hand-edited file, a native menu bar, and synchronised
+      scrolling if the editor's scroll extent ever becomes reachable (see [Known gaps](#known-gaps))
 
 ## License
 

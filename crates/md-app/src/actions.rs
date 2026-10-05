@@ -7,7 +7,18 @@
 
 use gpui_kit::actions;
 
-actions!(md, [Quit, CloseTab, ToggleTheme, Save, SaveAs, ExportHtml]);
+actions!(
+    md,
+    [
+        Quit,
+        CloseTab,
+        ToggleTheme,
+        OpenFile,
+        Save,
+        SaveAs,
+        ExportHtml
+    ]
+);
 
 /// Switch to the tab strip's `n`th tab, counting from zero.
 ///

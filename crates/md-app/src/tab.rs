@@ -209,8 +209,8 @@ mod tests {
     use gpui_kit::base::Root;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        AppContext as _, Bounds, Entity, Focusable as _, Point, TestAppContext, WindowBounds,
-        WindowHandle, WindowOptions, px, size,
+        AppContext as _, Bounds, Entity, Focusable as _, Point, TestAppContext, VisualTestContext,
+        WindowBounds, WindowHandle, WindowOptions, px, size,
     };
     use md_core::Document;
     use std::time::Duration;
@@ -279,6 +279,76 @@ mod tests {
             .advance_clock(PREVIEW_DEBOUNCE + Duration::from_millis(20));
         cx.run_until_parked();
         assert_eq!(preview_markdown(cx, &tab), "# Title");
+    }
+
+    /// Puts some text in a fresh tab and presses one keystroke on it.
+    ///
+    /// The keystroke goes through the window's key map rather than the action
+    /// being dispatched directly, because the point of the tests below is that
+    /// the shortcut itself is routed to the source pane — a key context that
+    /// only matches where it should.
+    fn press_in_editor(
+        cx: &mut TestAppContext,
+        document: Document,
+        keystroke: &str,
+    ) -> Entity<Tab> {
+        let (window, tab) = open_tab(cx, document);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+
+        let focus = cx.update(|_, cx| tab.read(cx).editor_focus(cx));
+        cx.update(|window, cx| {
+            window.focus(&focus, cx);
+            window.input("one two one", cx);
+        });
+
+        // macOS binds these to Cmd; everywhere else to Ctrl.
+        let keystroke = match keystroke {
+            "find" if cfg!(target_os = "macos") => "cmd-f",
+            "find" => "ctrl-f",
+            "replace" if cfg!(target_os = "macos") => "cmd-shift-f",
+            "replace" => "ctrl-h",
+            other => other,
+        };
+        cx.simulate_keystrokes(keystroke);
+        tab
+    }
+
+    /// <kbd>Cmd</kbd>+<kbd>F</kbd> opens the source pane's own find bar.
+    ///
+    /// The bar is the library's, not the app's: `EditorState::new` turns on
+    /// searching for the code-editor mode, and the panel is drawn by the very
+    /// `Editor` element the pane renders. That makes this test the only thing
+    /// standing between the shortcut and silently doing nothing — if the state
+    /// is ever built a different way, the keystroke would fall through to the
+    /// window and the bar would never open.
+    #[gpui_kit::test]
+    fn the_find_bar_opens_on_the_search_shortcut(cx: &mut TestAppContext) {
+        let tab = press_in_editor(cx, Document::new(), "find");
+
+        let session = tab.read_with(cx, |tab, cx| {
+            tab.editor.read(cx).state.read(cx).search_session().clone()
+        });
+
+        assert!(session.open, "the find bar should be open");
+        assert!(session.is_active(), "and it should be the one in charge");
+        assert!(!session.replace_mode, "Cmd+F finds; it does not replace");
+    }
+
+    /// <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> opens it straight into
+    /// replace mode, which is the same bar with the replacement field on it.
+    #[gpui_kit::test]
+    fn the_replace_bar_opens_on_its_own_shortcut(cx: &mut TestAppContext) {
+        let tab = press_in_editor(cx, Document::new(), "replace");
+
+        let session = tab.read_with(cx, |tab, cx| {
+            tab.editor.read(cx).state.read(cx).search_session().clone()
+        });
+
+        assert!(session.open);
+        assert!(
+            session.replace_mode,
+            "Cmd+Shift+F should ask for a replacement"
+        );
     }
 
     /// A document opened from disk starts clean and shows its file name.

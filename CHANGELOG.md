@@ -10,6 +10,20 @@ publish a version that has no section. See [Releasing](#releasing) at the bottom
 
 ## [Unreleased]
 
+### Added
+
+- **Open file.** <kbd>Cmd</kbd>+<kbd>O</kbd> picks a file through the platform's dialog, for the
+  ones the sidebar's tree cannot reach: anything outside the folder it is rooted at, and everything
+  at all before a folder has been opened.
+- **Recently opened files.** With no folder open, the sidebar lists the twenty documents opened most
+  recently, newest first, each row naming the folder it sits in. Choosing one that has since moved or
+  been deleted says why and drops the entry, and renaming or deleting a file from the tree keeps the
+  list pointing at where the file actually is. The list is `recent.json`, beside `settings.json` in
+  the configuration directory.
+- **Find and replace.** <kbd>Cmd</kbd>+<kbd>F</kbd> and
+  <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> over the source pane, from the editor component's
+  built-in search.
+
 ## [0.1.0] - 2026-10-05
 
 The first release. An editor with two panes — Markdown source on the left, rendered output on the

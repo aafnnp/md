@@ -14,9 +14,10 @@ use gpui_kit::component::{ActiveTheme, WindowExt as _, v_flex};
 use gpui_kit::*;
 
 use md_core::fs;
+use md_core::recent::{self, RecentFiles};
 use md_core::{Document, export};
 
-use crate::actions::{CloseTab, ExportHtml, Quit, Save, SaveAs, SelectTab, ToggleTheme};
+use crate::actions::{CloseTab, ExportHtml, OpenFile, Quit, Save, SaveAs, SelectTab, ToggleTheme};
 use crate::settings::{self, AppSettings};
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarRequest};
 use crate::tab::Tab;
@@ -48,6 +49,15 @@ pub struct Workspace {
     /// Source of `Tab` ids. Never reused, so a closed tab's splitter layout
     /// cannot leak into the tab that takes its place.
     next_tab_id: u64,
+    /// The file the list of recently opened documents is kept in, or `None`
+    /// when this platform gives the app no configuration directory to put one
+    /// in — in which case the list is simply not kept.
+    ///
+    /// A field rather than a call to [`recent::recent_path`] at each use so a
+    /// test can point it at a scratch file. The tests open real files, and
+    /// opening one records it: without this every run would rewrite the
+    /// developer's own list with paths out of `/tmp`.
+    recents: Option<PathBuf>,
     /// Dropping a `Subscription` cancels it, so this has to be held: a
     /// subscription created and discarded would leave the tree's rows opening
     /// nothing at all.
@@ -79,9 +89,15 @@ impl Workspace {
             active: 0,
             sidebar,
             next_tab_id: 0,
+            recents: recent::recent_path(),
             _sidebar_events,
             _appearance,
         };
+
+        // Before anything is opened this session, offer what was opened last
+        // session. A read failure is an empty list, which is what a first run
+        // looks like too, so there is nothing to report either way.
+        workspace.publish_recents(cx);
 
         let mut starter = Document::new();
         starter.set_text(STARTER_DOCUMENT);
@@ -113,13 +129,176 @@ impl Workspace {
             .position(|tab| tab.read(cx).path() == Some(path.as_path()));
         if let Some(index) = already_open {
             self.select(index, cx);
+            // Still recorded. This is the document being worked on now, and the
+            // recent list is about what was opened, not what was new.
+            self.remember(&path, window, cx);
             return;
         }
 
         match Document::open(&path) {
-            Ok(document) => self.open(document, window, cx),
+            Ok(document) => {
+                self.open(document, window, cx);
+                self.remember(&path, window, cx);
+            }
+            // Recorded from an earlier session, and gone since: a volume
+            // unmounted, a file deleted outside the app. The failure is
+            // reported — a click that did nothing looks broken — and the entry
+            // is dropped, because leaving it there would offer it again every
+            // time the sidebar is looked at.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.forget(&path, window, cx);
+                report_open_failure(&path, &error, window, cx);
+            }
             Err(error) => report_open_failure(&path, &error, window, cx),
         }
+    }
+
+    /// Ask for a file and open it.
+    ///
+    /// Reaches the files that the sidebar's tree cannot, which is every file
+    /// that is not under the folder it happens to be rooted at — and every file
+    /// at all before a folder has been opened.
+    fn open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open file".into()),
+        });
+        // `Context::spawn` hands out an `AsyncApp`, which is not tied to a
+        // window; opening a file needs one to focus the new tab's editor.
+        let window = window.window_handle();
+
+        cx.spawn(async move |this, cx| {
+            // Cancelling needs no explanation, and a platform without a file
+            // panel cannot be fixed by a message from here.
+            let Ok(Ok(Some(mut paths))) = picked.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else {
+                return;
+            };
+
+            cx.update_window(window, move |_, window, cx| {
+                this.update(cx, |workspace, cx| workspace.open_path(path, window, cx))
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The recently opened files, newest first, as they stand on disk.
+    ///
+    /// A file that cannot be read or parsed is an empty list: the same bargain
+    /// the settings file gets, and here even the failure is only a convenience.
+    fn recents(&self) -> RecentFiles {
+        match &self.recents {
+            Some(path) => RecentFiles::load_from(path),
+            None => RecentFiles::default(),
+        }
+    }
+
+    /// Write the recent list back and show it.
+    ///
+    /// Every change goes through here, so the sidebar and the file cannot end
+    /// up disagreeing about what was opened last.
+    ///
+    /// `window` is where a write failure would be reported, and there is one
+    /// everywhere except a rename — a name dialog's callbacks are handed an
+    /// `App` and no window. There the failure is passed over rather than
+    /// swallowed: the list in memory is still correct, and the next file that
+    /// is opened writes the whole of it again.
+    fn store_recents(
+        &mut self,
+        files: RecentFiles,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(path) = &self.recents
+            && let Err(error) = files.save_to(path)
+        {
+            // Recording what was opened is not what opening it depends on, so
+            // this costs the user nothing yet — but a recent list that silently
+            // stops growing is otherwise unexplainable.
+            if let Some(window) = window {
+                window.push_notification(
+                    Notification::warning(format!(
+                        "Could not record recent files in “{}”: {error}",
+                        file_label(path)
+                    )),
+                    cx,
+                );
+            }
+        }
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_recents(files.entries().to_vec(), cx)
+        });
+    }
+
+    /// Show the list as it stands on disk, without changing it.
+    fn publish_recents(&mut self, cx: &mut Context<Self>) {
+        let files = self.recents();
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_recents(files.entries().to_vec(), cx)
+        });
+    }
+
+    /// Note that `path` was opened, putting it at the top of the list.
+    fn remember(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let mut files = self.recents();
+        files.push(path);
+        self.store_recents(files, Some(window), cx);
+    }
+
+    /// Drop `path` from the list.
+    fn forget(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let mut files = self.recents();
+        let before = files.len();
+        files.remove(path);
+        if files.len() == before {
+            // It was not in the list, and writing the file back to say nothing
+            // had changed would be a write for nothing.
+            return;
+        }
+        self.store_recents(files, Some(window), cx);
+    }
+
+    /// Point the recent list at where a rename just moved its files.
+    ///
+    /// The same job [`Self::repath_tabs`] does for the tabs, and for the same
+    /// reason: an entry still naming the old path would offer a file that is
+    /// no longer there.
+    fn repath_recents(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
+        let mut files = self.recents();
+        let moved: Vec<PathBuf> = files
+            .entries()
+            .iter()
+            .map(|current| match current.strip_prefix(from) {
+                Ok(rest) => to.join(rest),
+                Err(_) => current.clone(),
+            })
+            .collect();
+        if moved == files.entries() {
+            return;
+        }
+
+        // `push` puts each entry at the front, so rebuilding the list means
+        // walking it backwards — the entries are already most-recent-first.
+        files.clear();
+        for path in moved.into_iter().rev() {
+            files.push(path);
+        }
+        self.store_recents(files, None, cx);
+    }
+
+    /// Keep the recent list in a file of the caller's choosing.
+    ///
+    /// Only the tests need this; a workspace in the app always uses the
+    /// platform's configuration directory. See the field for why.
+    #[cfg(test)]
+    pub(crate) fn use_recents_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.recents = Some(path);
+        self.publish_recents(cx);
     }
 
     /// Carry out a change the tree's context menu asked for.
@@ -250,7 +429,10 @@ impl Workspace {
                 // path is a directory is a fact about the filesystem, and
                 // reading it now is what makes it true at the moment it matters.
                 match fs::rename(path, name, path.is_dir()) {
-                    Ok(moved) => self.repath_tabs(path, &moved, cx),
+                    Ok(moved) => {
+                        self.repath_tabs(path, &moved, cx);
+                        self.repath_recents(path, &moved, cx);
+                    }
                     Err(error) => return NameOutcome::Refused(error.to_string()),
                 }
             }
@@ -441,9 +623,11 @@ impl Workspace {
         }
 
         let sidebar = self.sidebar.clone();
+        let workspace = cx.weak_entity();
         let name = file_label(&path);
         window.open_alert_dialog(cx, move |alert, _, _| {
             let sidebar = sidebar.clone();
+            let workspace = workspace.clone();
             let path = path.clone();
             alert
                 .confirm()
@@ -459,12 +643,22 @@ impl Workspace {
                     // from disk, and something else may have removed it since.
                     // Reporting that is the difference between a stale row and a
                     // click that appeared to do nothing.
-                    if let Err(error) = fs::delete_file(&path) {
-                        let name = file_label(&path);
-                        window.push_notification(
-                            Notification::error(format!("Could not delete “{name}”: {error}")),
-                            cx,
-                        );
+                    match fs::delete_file(&path) {
+                        // Only once it is really gone: a delete that failed left
+                        // the file where it was, and the recent entry pointing at
+                        // it is still good.
+                        Ok(()) => {
+                            workspace
+                                .update(cx, |workspace, cx| workspace.forget(&path, window, cx))
+                                .ok();
+                        }
+                        Err(error) => {
+                            let name = file_label(&path);
+                            window.push_notification(
+                                Notification::error(format!("Could not delete “{name}”: {error}")),
+                                cx,
+                            );
+                        }
                     }
                     sidebar.update(cx, |sidebar, cx| sidebar.refresh(cx));
                     true
@@ -930,6 +1124,7 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &ExportHtml, window, cx| this.export_active(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.open_file(window, cx)))
             .child(self.render_tab_strip(cx))
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
     }
@@ -940,7 +1135,7 @@ mod tests {
     // Imported narrowly: `use super::*` would drag in the `gpui_kit::*` glob,
     // whose `test` attribute macro shadows the built-in `#[test]`.
     use super::{NameOutcome, NameTarget, STARTER_DOCUMENT, Workspace};
-    use crate::actions::{CloseTab, ExportHtml, SelectTab};
+    use crate::actions::{CloseTab, ExportHtml, OpenFile, SelectTab};
     use crate::sidebar::SidebarRequest;
     use gpui_kit::base::Root;
     use gpui_kit::component::WindowExt as _;
@@ -950,8 +1145,24 @@ mod tests {
         WindowOptions, px, size,
     };
     use md_core::Document;
+    use md_core::RecentFiles;
     use md_core::fs::NameError;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A path no other test is using.
+    ///
+    /// The pid is not enough on its own: the tests run in parallel, so a single
+    /// shared name would have them reading each other's lists. The counter makes
+    /// every call distinct within the run.
+    fn private_recents() -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        std::env::temp_dir().join(format!(
+            "md-app-recents-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     fn open_workspace(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Workspace>) {
         cx.update(gpui_kit::init);
@@ -969,6 +1180,13 @@ mod tests {
                 |window, cx| cx.new(|cx| Workspace::new(window, cx)),
             )
             .expect("open test window");
+            // `Workspace::new` points the recent list at the developer's real
+            // configuration directory. Several tests below open real files, and
+            // opening a file records it — left alone, a `cargo test` would
+            // overwrite the list of whoever ran it with paths out of `/tmp`.
+            workspace.update(cx, |workspace, cx| {
+                workspace.use_recents_file(private_recents(), cx);
+            });
             (window.downcast::<Root>().expect("base Root"), workspace)
         })
     }
@@ -1186,6 +1404,162 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The recent list the sidebar is showing.
+    ///
+    /// Read from the sidebar rather than the file because this is the list a
+    /// click would actually open from, and it is not re-read from disk between
+    /// a change and this call — so it is where a broken update would show.
+    fn shown_recents(cx: &TestAppContext, workspace: &Entity<Workspace>) -> Vec<PathBuf> {
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.read_with(cx, |sidebar, _| sidebar.recents().to_vec())
+    }
+
+    /// The recent list as it stands in the workspace's own file.
+    fn stored_recents(cx: &TestAppContext, workspace: &Entity<Workspace>) -> Vec<PathBuf> {
+        let store = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .recents
+                .clone()
+                .expect("every test workspace is pointed at a scratch file")
+        });
+        RecentFiles::load_from(&store).entries().to_vec()
+    }
+
+    /// `Cmd+O` asks the platform for a file, and opening the one it names gives
+    /// a tab and a record of it.
+    ///
+    /// The whole round trip, because the await is what ships: a test that called
+    /// `open_path` directly would not notice if the answer never came back.
+    #[gpui_kit::test]
+    fn opening_a_file_through_the_dialog_opens_its_tab(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("open-dialog");
+        let picked = dir.join("picked.md");
+        std::fs::write(&picked, "# picked").unwrap();
+
+        dispatch::<OpenFile>(window, OpenFile, cx);
+        assert!(
+            cx.did_prompt_for_paths(),
+            "Cmd+O has to ask which file to open"
+        );
+
+        cx.simulate_path_prompt_response(|_| Some(vec![picked.clone()]));
+        cx.run_until_parked();
+
+        assert_eq!(titles(cx, &workspace), ["Untitled", "picked.md"]);
+        assert_eq!(shown_recents(cx, &workspace), vec![picked.clone()]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Cancelling the file dialog opens nothing and records nothing.
+    #[gpui_kit::test]
+    fn cancelling_the_file_dialog_changes_nothing(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+
+        dispatch::<OpenFile>(window, OpenFile, cx);
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|_| None);
+        cx.run_until_parked();
+
+        assert_eq!(titles(cx, &workspace), ["Untitled"]);
+        assert!(shown_recents(cx, &workspace).is_empty());
+    }
+
+    /// Opening a file records it, newest first, in the file as well as on
+    /// screen.
+    #[gpui_kit::test]
+    fn opening_a_file_records_it_as_recent(cx: &mut TestAppContext) {
+        let (_, workspace) = open_workspace(cx);
+        let dir = scratch("recents");
+        let first = dir.join("first.md");
+        let second = dir.join("second.md");
+        std::fs::write(&first, "# first").unwrap();
+        std::fs::write(&second, "# second").unwrap();
+
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(first.clone(), cx));
+        sidebar.update(cx, |sidebar, cx| sidebar.open(second.clone(), cx));
+
+        let expected = vec![second.clone(), first.clone()];
+        assert_eq!(
+            stored_recents(cx, &workspace),
+            expected,
+            "the newest file comes first, and the list is written out"
+        );
+        assert_eq!(
+            shown_recents(cx, &workspace),
+            expected,
+            "the sidebar is shown what was written, not a list of its own"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Re-opening the file that is already in front still counts as opening
+    /// it: the recent list is about what is being worked on, not what is new.
+    #[gpui_kit::test]
+    fn opening_the_active_file_again_still_records_it(cx: &mut TestAppContext) {
+        let (_, workspace) = open_workspace(cx);
+        let dir = scratch("recents-again");
+        let first = dir.join("first.md");
+        let second = dir.join("second.md");
+        std::fs::write(&first, "# first").unwrap();
+        std::fs::write(&second, "# second").unwrap();
+
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(first.clone(), cx));
+        sidebar.update(cx, |sidebar, cx| sidebar.open(second.clone(), cx));
+        // `first` has a tab already, so this brings that tab forward rather
+        // than creating one — and must still move it to the top of the list.
+        sidebar.update(cx, |sidebar, cx| sidebar.open(first.clone(), cx));
+
+        assert_eq!(
+            titles(cx, &workspace),
+            ["Untitled", "first.md", "second.md"]
+        );
+        assert_eq!(stored_recents(cx, &workspace), vec![first, second]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A remembered file that has since been removed is dropped when the click
+    /// fails, so the sidebar stops offering a row that cannot work.
+    #[gpui_kit::test]
+    fn opening_a_vanished_recent_forgets_it(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("recents-gone");
+        let path = dir.join("vanished.md");
+        std::fs::write(&path, "# here").unwrap();
+
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(path.clone(), cx));
+        assert_eq!(shown_recents(cx, &workspace), vec![path.clone()]);
+
+        // The tab has to go first. While it is open the file is not gone as far
+        // as the app is concerned — the row brings that tab forward and never
+        // touches the disk — so the entry would rightly survive.
+        dispatch(window, CloseTab, cx);
+        assert_eq!(titles(cx, &workspace), ["Untitled"]);
+
+        // Removed behind the app's back — another program, or a volume that was
+        // unmounted. The row is still on screen, so the click must say so.
+        std::fs::remove_file(&path).unwrap();
+        sidebar.update(cx, |sidebar, cx| sidebar.open(path.clone(), cx));
+
+        assert!(has_dialog(window, cx), "the failure should be reported");
+        assert!(
+            shown_recents(cx, &workspace).is_empty(),
+            "the entry should go, or every later glance at the sidebar offers it again"
+        );
+        assert!(
+            stored_recents(cx, &workspace).is_empty(),
+            "and the file must agree, or it comes back next launch"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Submit `name` to the workspace, exactly as the name dialog's OK button
     /// does once it has the text.
     fn apply(
@@ -1336,6 +1710,40 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A renamed file is renamed in the recent list too.
+    ///
+    /// An entry still naming the old path would offer a file that is no longer
+    /// there — and the click would fail, which is how a rename would look like
+    /// a bug in the recent list rather than a stale entry.
+    #[gpui_kit::test]
+    fn renaming_a_file_moves_its_recent_entry(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("rename-recent");
+        let before = dir.join("before.md");
+        std::fs::write(&before, "# body").unwrap();
+
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(before.clone(), cx));
+        assert_eq!(shown_recents(cx, &workspace), vec![before.clone()]);
+
+        let outcome = apply(
+            window,
+            &workspace,
+            &NameTarget::Rename {
+                path: before.clone(),
+            },
+            "after",
+            cx,
+        );
+        assert_eq!(outcome, NameOutcome::Done);
+
+        let after = dir.join("after.md");
+        assert_eq!(stored_recents(cx, &workspace), vec![after.clone()]);
+        assert_eq!(shown_recents(cx, &workspace), vec![after]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Renaming a directory moves everything inside it, so a tab under that
     /// directory is retargeted too.
     #[gpui_kit::test]
@@ -1364,8 +1772,13 @@ mod tests {
         assert!(moved.exists());
         assert_eq!(
             tab_path(&workspace, 1, cx),
-            Some(moved),
+            Some(moved.clone()),
             "a tab under the renamed folder must move with it"
+        );
+        assert_eq!(
+            shown_recents(cx, &workspace),
+            vec![moved],
+            "and so must a recent entry, for the same reason"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -1398,6 +1811,45 @@ mod tests {
         assert!(
             !has_dialog(window, cx),
             "and no delete prompt should even be offered"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Forgetting a path drops it and leaves the rest; forgetting a path that
+    /// was never recorded changes nothing.
+    ///
+    /// The delete dialog calls this once the file is really gone, and
+    /// `RecentFiles::remove` reports nothing, so the only way to tell the two
+    /// cases apart is by counting — which is what this pins down.
+    #[gpui_kit::test]
+    fn forgetting_a_recent_removes_only_that_entry(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("forget");
+        let kept = dir.join("kept.md");
+        let gone = dir.join("gone.md");
+        std::fs::write(&kept, "# kept").unwrap();
+        std::fs::write(&gone, "# gone").unwrap();
+
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(kept.clone(), cx));
+        sidebar.update(cx, |sidebar, cx| sidebar.open(gone.clone(), cx));
+
+        cx.update_window(window.into(), |_, window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.forget(&kept, window, cx));
+        })
+        .unwrap();
+        assert_eq!(shown_recents(cx, &workspace), vec![gone.clone()]);
+
+        let absent = dir.join("absent.md");
+        cx.update_window(window.into(), |_, window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.forget(&absent, window, cx));
+        })
+        .unwrap();
+        assert_eq!(
+            shown_recents(cx, &workspace),
+            vec![gone],
+            "a path that was never in the list is not a reason to touch it"
         );
 
         std::fs::remove_dir_all(&dir).ok();

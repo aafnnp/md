@@ -160,17 +160,25 @@ impl Settings {
     }
 }
 
-/// Where the settings file lives.
+/// The folder the app keeps its files in.
 ///
 /// The platform's per-user configuration directory, in a folder named for the
 /// app. The qualifier and organisation match the identifier the app is
-/// packaged under, so macOS gets
-/// `~/Library/Application Support/dev.aafnnp.md/settings.json`. `None` when the
-/// platform cannot name a directory for the current user — on Linux that needs
-/// a `$HOME` — in which case the app runs with the defaults and saves nothing.
-pub fn settings_path() -> Option<PathBuf> {
+/// packaged under, so macOS gets `~/Library/Application Support/dev.aafnnp.md/`.
+/// `None` when the platform cannot name a directory for the current user — on
+/// Linux that needs a `$HOME` — in which case the app runs with the defaults
+/// and saves nothing.
+///
+/// Shared rather than repeated per file, so the settings and the recent-files
+/// list cannot end up in two different folders with the same name.
+pub fn config_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("dev", "aafnnp", "md")
-        .map(|dirs| dirs.config_dir().join(FILE_NAME))
+        .map(|dirs| dirs.config_dir().to_path_buf())
+}
+
+/// Where the settings file lives.
+pub fn settings_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join(FILE_NAME))
 }
 
 /// Treat a blank family as unset.
