@@ -27,10 +27,13 @@ pub fn resolve(base_dir: &Path, url: &str) -> Option<PathBuf> {
     if Path::new(&url).is_absolute() {
         return None;
     }
-    // Windows reads a leading `\` as rooted in the current drive, and a joined
-    // path would silently replace the base rather than extend it. Backslash is a
-    // legal file name character on Unix, where no such file exists in practice.
-    if url.starts_with('\\') {
+    // Rooted but not absolute, which is a distinction only Windows draws: it
+    // reads a leading separator — either one — as the root of the current
+    // drive, while `is_absolute` above also wants a drive letter or a UNC
+    // prefix, so `/var/a.png` passes it. Joining that would replace the base
+    // directory instead of extending it. Backslash is a legal file name
+    // character on Unix, where no such file exists in practice.
+    if url.starts_with(['/', '\\']) {
         return None;
     }
     Some(base_dir.join(percent_decode(&url)))
