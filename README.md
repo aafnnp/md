@@ -5,9 +5,10 @@ framework from Zed, using the [gpui-kit](https://github.com/longbridge/gpui-kit)
 
 Two panes: write Markdown on the left, see it rendered on the right, live as you type.
 
-> **Status: early.** M0–M3 are done, and files can be saved. The editor opens, edits, renders and
-> saves Markdown in two panes, keeps tabs and a file tree, and remembers its theme. Export is still
-> missing — see [Roadmap](#roadmap).
+> **Status: early.** M0–M4 are done, apart from clickable task-list checkboxes (see
+> [Known gaps](#known-gaps)). The editor opens, edits, renders, saves and exports Markdown in two
+> panes, keeps tabs and a file tree, resolves images relative to the document, and remembers its
+> theme. Packaging and tagged releases are still missing — see [Roadmap](#roadmap).
 
 ## Stack
 
@@ -68,6 +69,54 @@ way forward.
 A tab's dirty dot clears when its text reaches the disk, and the tab is retargeted by save-as, so the
 next <kbd>Cmd</kbd>+<kbd>S</kbd> writes there rather than asking again.
 
+## Exporting
+
+<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> writes the active tab out as a standalone HTML page. It
+is the same parser the preview renders with, so a table, a task list or a strikethrough comes out of
+the export as the same construct you were looking at — the two cannot drift apart without the parser
+changing under both.
+
+The page is a complete document, not a fragment: it carries the UTF-8 declaration (without it a
+Chinese document opens as mojibake), a small stylesheet that covers light and dark, and no external
+files or network requests. Raw HTML in the source is escaped rather than emitted, so a document that
+merely *mentions* `<script>` does not run it when the exported file is opened.
+
+Exporting uses the platform's own save panel rather than the in-app name prompt that save-as uses.
+They are asking different questions: saving renames the document you are editing, so it starts in
+that file's folder, while an export is a *new* file that usually belongs somewhere else. The
+suggested name is the document's own with an `.html` extension — `notes.md` exports to `notes.html`,
+and an untitled buffer to `untitled.html`.
+
+## Images
+
+`![](diagram.png)` is resolved against the folder the document is in, so an image next to the note
+is found without any path fiddling. A URL that already means something — `https:`, `data:`, `file:`,
+an absolute path — is passed through untouched.
+
+Following CommonMark, a URL may be wrapped in `<...>`, and a `#fragment` or `?query` is a position
+inside the file rather than part of its name. A percent-encoded name is decoded, since `my%20diagram.png`
+is the file `my diagram.png`. An untitled buffer has no folder to be relative to, so nothing is
+guessed on its behalf: the document's images resolve when the document has somewhere to live.
+
+## Known gaps
+
+Two things the plan called for are missing, both for the same reason — the component underneath does
+not offer a way to build them without forking it. They are left out rather than shipped as knobs
+that do nothing.
+
+**Clickable task-list checkboxes.** `- [x]` renders as a checkbox, but clicking it does nothing.
+`gpui-base` draws that checkbox as a static `div` with no id, no click handler and no hook
+(`text/node.rs`, in `render_list_item`); `on_link_click` is the only interactive callback a
+`TextView` has. Making it clickable means replacing the built-in list rendering with a custom block
+plugin that redraws every item, which would look different from every other list in the document and
+would stop tracking future fixes upstream. Writing back to the source is a further piece of work on
+top of that.
+
+**Synchronised scrolling.** The plan called for a preview scroll ratio, but `gpui-base`'s
+`TextViewState` keeps its scroll offset private (`scroll_offset` is `pub(super)`) and offers no
+scroll handle, and `EditorState` exposes none at all. The two panes cannot be linked without forking
+the component.
+
 ## Settings
 
 The theme button at the right of the tab strip cycles **System → Light → Dark**. On *System* the
@@ -98,11 +147,24 @@ rather than one the app silently erases.
 Setting the theme changes `"theme"` in the file, and writing it drops any key this build does not
 know about.
 
-**Not implemented: synchronised scrolling.** The plan called for a preview scroll ratio, but
-`gpui-base`'s `TextViewState` keeps its scroll offset private (`scroll_offset` is `pub(super)`) and
-offers no scroll handle, and `EditorState` exposes none at all. The two panes cannot be linked
-without forking the component, so the setting is left out rather than shipped as a knob that does
-nothing.
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `master` and every pull request:
+
+- **rustfmt** — `cargo fmt --all -- --check`, on Linux alone, since formatting needs no compiler.
+- **clippy** — `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+- **test** — `cargo test --workspace --locked` on Linux, macOS and Windows, with `fail-fast` off so
+  one platform failing does not hide the other two.
+
+`--locked` everywhere, because `Cargo.lock` is committed and a GPUI bump is meant to be a deliberate
+change rather than something a fresh resolve decides. There is deliberately no `build` job: `cargo
+test` already compiles every crate on every platform, and a CI runner has no display server and no
+GPU, so the app cannot be launched there either way. Release-only concerns — thin LTO under a
+memory-capped runner, Windows needing `fxc.exe` on `PATH` — belong to the release workflow, where
+they will actually surface.
+
+Linux builds are pinned to `ubuntu-22.04` (glibc 2.35) rather than `ubuntu-latest` (24.04, glibc
+2.39): a binary built against the newer glibc will not run on Debian 12 or Ubuntu 22.04.
 
 ## Installing a release
 
@@ -121,8 +183,10 @@ Release builds are **unsigned**. That has real consequences:
 
 ```
 crates/
-  md-core/     pure logic: documents, file I/O, settings, export — no GPUI
+  md-core/     pure logic: documents, file I/O, settings, image resolution, export — no GPUI
   md-app/      the `md` binary: GPUI views and layout
+.github/workflows/
+  ci.yml       fmt, clippy and tests on every push and pull request
 ```
 
 ## Roadmap
@@ -131,7 +195,9 @@ crates/
 - [x] **M1** — document core, two-pane layout, live preview with debounce
 - [x] **M2** — tabs, file tree sidebar, unsaved-close confirmation
 - [x] **M3** — light/dark themes, persisted settings
-- [ ] **M4** — GFM tables, images, task lists, HTML export
+- [x] **M4** — GFM tables, images, HTML export
+- [ ] **M4** — clickable task-list checkboxes (see [Known gaps](#known-gaps)), and inserting
+      `![]()` by dropping an image onto the editor
 - [ ] **M5** — packaging and tag-triggered multi-platform release
 - [x] **Save** — <kbd>Cmd</kbd>+<kbd>S</kbd> / <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd>, with
       an overwrite confirmation and a guard against two tabs over one file

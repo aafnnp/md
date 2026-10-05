@@ -10,5 +10,6 @@ rust-version.workspace = true
 
 [dependencies]
 directories.workspace = true
+markdown.workspace = true
 serde.workspace = true
 serde_json.workspace = true

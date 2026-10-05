@@ -5,10 +5,13 @@
 //! server, which is what makes the logic here actually testable.
 
 pub mod document;
+pub mod export;
 pub mod fs;
+pub mod image;
 pub mod recent;
 pub mod settings;
 
 pub use document::Document;
+pub use export::to_html_page;
 pub use recent::RecentFiles;
 pub use settings::{Settings, ThemePreference};

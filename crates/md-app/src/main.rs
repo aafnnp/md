@@ -11,7 +11,7 @@ mod workspace;
 use gpui_kit::*;
 use md_core::settings::Settings;
 
-use crate::actions::{CloseTab, Quit, Save, SaveAs, SelectTab, ToggleTheme};
+use crate::actions::{CloseTab, ExportHtml, Quit, Save, SaveAs, SelectTab, ToggleTheme};
 use crate::settings::AppSettings;
 use crate::workspace::Workspace;
 
@@ -50,6 +50,7 @@ fn main() {
                 KeyBinding::new("cmd-shift-t", ToggleTheme, None),
                 KeyBinding::new("cmd-s", Save, None),
                 KeyBinding::new("cmd-shift-s", SaveAs, None),
+                KeyBinding::new("cmd-shift-e", ExportHtml, None),
             ]);
             cx.bind_keys(tab_shortcuts());
             gpui_kit::open_window(window_options, cx, |window, cx| {

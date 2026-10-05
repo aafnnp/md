@@ -13,6 +13,10 @@ rust-version = "1.95"
 [workspace.dependencies]
 md-core = { path = "crates/md-core" }
 directories = "6"
+# The same Markdown parser gpui-kit's preview uses, so a table or a task list
+# is the same construct in the preview and in an exported page. Version 1
+# already sits in the lock file as a transitive dependency of gpui-base.
+markdown = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

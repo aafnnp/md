@@ -53,7 +53,7 @@ impl Tab {
             }
         });
 
-        let tab = Self {
+        let mut tab = Self {
             id,
             document,
             editor,
@@ -65,6 +65,7 @@ impl Tab {
         let initial = tab.document.text().to_string();
         tab.preview
             .update(cx, |preview, cx| preview.set_markdown(&initial, cx));
+        tab.sync_preview_base(cx);
 
         // An opened document is the one being edited, so put the caret in it.
         // Without this the first keystroke after opening a file goes nowhere.
@@ -91,14 +92,23 @@ impl Tab {
         self.document.path()
     }
 
+    /// The source pane's text, as it stands right now.
+    ///
+    /// This is the buffer, not the document: a keystroke reaches the editor a
+    /// frame before the change subscription copies it across, so anything that
+    /// has to act on what the user is looking at — saving, exporting — reads
+    /// it from here rather than trusting the document to have caught up.
+    pub fn markdown(&self, cx: &App) -> String {
+        self.editor.read(cx).state.read(cx).value().to_string()
+    }
+
     /// The buffer as the editor currently holds it.
     ///
     /// The tests read this back to check that two tabs really do hold separate
-    /// buffers. Gated rather than `pub` so the shipping binary carries no dead
-    /// code; the app renders through the editor element itself.
+    /// buffers.
     #[cfg(test)]
     pub fn text(&self, cx: &App) -> String {
-        self.editor.read(cx).state.read(cx).value().to_string()
+        self.markdown(cx)
     }
 
     /// A handle on the source pane, so a test can put the caret in it and type.
@@ -120,13 +130,17 @@ impl Tab {
     /// written has to be what is on screen, and the buffer is the authority on
     /// that.
     pub fn save_to(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) -> io::Result<()> {
-        let markdown = self.editor.read(cx).state.read(cx).value().to_string();
+        let markdown = self.markdown(cx);
         self.document.set_text(markdown);
 
         match path {
             Some(path) => self.document.save_as(path),
             None => self.document.save(),
         }?;
+
+        // A first save gives the document a file, and with it a directory the
+        // preview's relative images resolve against.
+        self.sync_preview_base(cx);
 
         // The dirty dot goes out, and a first save replaces "Untitled" with the
         // file's own name.
@@ -141,8 +155,17 @@ impl Tab {
     /// been saved.
     pub fn repath(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.document.repath(path);
+        // The file moved, so its images did too, relative to a new directory.
+        self.sync_preview_base(cx);
         // The tab strip shows the file name, so it has to be redrawn.
         cx.notify();
+    }
+
+    /// Tell the preview which folder this document's relative images sit in.
+    fn sync_preview_base(&mut self, cx: &mut Context<Self>) {
+        let base = self.document.base_dir();
+        self.preview
+            .update(cx, |preview, cx| preview.set_base_dir(base, cx));
     }
 
     /// Schedule a preview re-render, replacing any pending one.
@@ -271,6 +294,58 @@ mod tests {
         assert_eq!(editor_text(cx, &tab), "# Saved\n");
         assert_eq!(tab.read_with(cx, |tab, _| tab.title()), "note.md");
         assert!(!tab.read_with(cx, |tab, _| tab.is_dirty()));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn preview_base(cx: &TestAppContext, tab: &Entity<Tab>) -> Option<std::path::PathBuf> {
+        tab.read_with(cx, |tab, cx| {
+            tab.preview
+                .read(cx)
+                .base_dir()
+                .map(std::path::Path::to_path_buf)
+        })
+    }
+
+    /// A document opened from a file resolves its images from that file's
+    /// folder, which is what makes `![](diagram.png)` find the diagram next to
+    /// the note rather than wherever the app was launched from.
+    #[gpui_kit::test]
+    fn an_opened_document_resolves_images_from_its_own_folder(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("md-app-base-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.md");
+        std::fs::write(&path, "![](diagram.png)\n").unwrap();
+
+        let (_, tab) = open_tab(cx, Document::open(&path).unwrap());
+        assert_eq!(preview_base(cx, &tab), Some(dir.clone()));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An unsaved buffer has no folder, and the preview is told so rather than
+    /// being pointed at the working directory.
+    #[gpui_kit::test]
+    fn an_untitled_buffer_has_no_folder_to_resolve_images_from(cx: &mut TestAppContext) {
+        let (_, tab) = open_tab(cx, Document::new());
+        assert_eq!(preview_base(cx, &tab), None);
+    }
+
+    /// Save-as moves the document, and the images with it: after it, a relative
+    /// URL means relative to the new file.
+    #[gpui_kit::test]
+    fn saving_as_moves_the_folder_images_resolve_from(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("md-app-base-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.md");
+
+        let (_, tab) = open_tab(cx, Document::new());
+        assert_eq!(preview_base(cx, &tab), None);
+
+        tab.update(cx, |tab, cx| {
+            tab.save_to(Some(path.clone()), cx).unwrap();
+        });
+        assert_eq!(preview_base(cx, &tab), Some(dir.clone()));
 
         std::fs::remove_dir_all(&dir).ok();
     }

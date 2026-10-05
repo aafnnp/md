@@ -13,10 +13,10 @@ use gpui_kit::component::tab::{Tab as TabButton, TabBar};
 use gpui_kit::component::{ActiveTheme, WindowExt as _, v_flex};
 use gpui_kit::*;
 
-use md_core::Document;
 use md_core::fs;
+use md_core::{Document, export};
 
-use crate::actions::{CloseTab, Quit, Save, SaveAs, SelectTab, ToggleTheme};
+use crate::actions::{CloseTab, ExportHtml, Quit, Save, SaveAs, SelectTab, ToggleTheme};
 use crate::settings::{self, AppSettings};
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarRequest};
 use crate::tab::Tab;
@@ -372,6 +372,53 @@ impl Workspace {
             .root()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// `Cmd+Shift+E`: write the active tab out as a standalone HTML page.
+    ///
+    /// This uses the platform's own save panel rather than the in-app name
+    /// prompt that Save As uses. The two are asking different questions: saving
+    /// renames the document you are editing, so the folder it lives in is the
+    /// right place to look, while an export is a *new* file that usually
+    /// belongs somewhere else entirely. A save panel is built for exactly that,
+    /// and it will not let the user overwrite a directory by accident.
+    fn export_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active).cloned() else {
+            return;
+        };
+        let directory = self.naming_directory(&tab, cx);
+        let suggested = export::suggested_file_name(&tab.read(cx).title());
+        let picked = cx.prompt_for_new_path(&directory, Some(&suggested));
+        // `Context::spawn` hands out an `AsyncApp`, which is not tied to a
+        // window, so the one to report into has to be carried across.
+        let window = window.window_handle();
+
+        cx.spawn(async move |this, cx| {
+            // Cancelling needs no explanation, and a platform without a save
+            // panel cannot be fixed by an error message of ours.
+            let Ok(Ok(Some(path))) = picked.await else {
+                return;
+            };
+
+            let written = this.update(cx, |_, cx| {
+                let markdown = tab.read(cx).markdown(cx);
+                let title = tab.read(cx).title();
+                export::export_html(&path, &title, &markdown)
+            });
+
+            let note = match written {
+                // The workspace is gone, so there is nowhere to show anything.
+                Err(_) => return,
+                Ok(Ok(())) => Notification::info(format!("Exported to {}", file_label(&path))),
+                Ok(Err(error)) => Notification::error(format!(
+                    "Could not export to “{}”: {error}",
+                    file_label(&path)
+                )),
+            };
+            cx.update_window(window, |_, window, cx| window.push_notification(note, cx))
+                .ok();
+        })
+        .detach();
     }
 
     /// Delete a file, asking first.
@@ -880,6 +927,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_theme))
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save_active(window, cx)))
             .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save_as_active(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &ExportHtml, window, cx| this.export_active(window, cx)),
+            )
             .child(self.render_tab_strip(cx))
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
     }
@@ -890,7 +940,7 @@ mod tests {
     // Imported narrowly: `use super::*` would drag in the `gpui_kit::*` glob,
     // whose `test` attribute macro shadows the built-in `#[test]`.
     use super::{NameOutcome, NameTarget, STARTER_DOCUMENT, Workspace};
-    use crate::actions::{CloseTab, SelectTab};
+    use crate::actions::{CloseTab, ExportHtml, SelectTab};
     use crate::sidebar::SidebarRequest;
     use gpui_kit::base::Root;
     use gpui_kit::component::WindowExt as _;
@@ -1585,6 +1635,78 @@ mod tests {
             std::fs::read_to_string(&taken).unwrap(),
             "# shared",
             "the other tab's file must be untouched"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `Cmd+Shift+E` asks the platform for a path and writes the page there.
+    ///
+    /// This drives the whole round trip rather than the write alone: the
+    /// platform prompt is stubbed by the test platform, and the answer is fed
+    /// back the way a real save panel would. What ships is the await, so a test
+    /// that skipped it would be testing something the app never does.
+    #[gpui_kit::test]
+    fn exporting_writes_an_html_page_where_the_save_panel_says(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("export");
+        let source = dir.join("note.md");
+        std::fs::write(&source, "# Heading\n\n| a | b |\n| - | - |\n| 1 | 2 |\n").unwrap();
+
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(source.clone(), cx));
+
+        dispatch::<ExportHtml>(window, ExportHtml, cx);
+        assert!(
+            cx.did_prompt_for_new_path(),
+            "export has to ask where to put the file"
+        );
+
+        let exported = dir.join("note.html");
+        cx.simulate_new_path_selection(|_| Some(exported.clone()));
+        cx.run_until_parked();
+
+        let page = std::fs::read_to_string(&exported).unwrap();
+        assert!(page.contains("<h1>Heading</h1>"), "{page}");
+        // The export uses the same parser as the preview, so a GFM table has
+        // to arrive as a table rather than as literal pipes.
+        assert!(page.contains("<table>"), "{page}");
+        assert!(page.contains("<title>note.md</title>"), "{page}");
+
+        // Exporting is not saving: the Markdown file is left exactly as it was.
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "# Heading\n\n| a | b |\n| - | - |\n| 1 | 2 |\n"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The save panel opens in the document's own folder: the common case is
+    /// an export landing beside the file it came from, so that is where the
+    /// dialog should already be looking.
+    #[gpui_kit::test]
+    fn export_offers_the_documents_folder(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("export-name");
+        let source = dir.join("notes.md");
+        std::fs::write(&source, "# Notes").unwrap();
+
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(source, cx));
+
+        dispatch::<ExportHtml>(window, ExportHtml, cx);
+        assert!(cx.did_prompt_for_new_path());
+
+        // Cancelling writes nothing and leaves the workspace as it was.
+        cx.simulate_new_path_selection(|offered| {
+            assert_eq!(offered, dir.as_path(), "the panel starts where the file is");
+            None
+        });
+        cx.run_until_parked();
+        assert!(
+            !dir.join("notes.html").exists(),
+            "cancelling must not write a file"
         );
 
         std::fs::remove_dir_all(&dir).ok();

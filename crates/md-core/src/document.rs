@@ -34,14 +34,18 @@ impl Document {
         self.path.as_deref()
     }
 
-    /// The directory used to resolve relative image and link paths in the
-    /// preview. Falls back to the working directory for unsaved documents.
-    pub fn base_dir(&self) -> PathBuf {
+    /// The directory relative image and link paths in this document are
+    /// resolved against.
+    ///
+    /// `None` for a buffer that has never been saved. There is no honest answer
+    /// for one — the working directory is where the process happens to have been
+    /// started, not where the document is — so the caller is told there is
+    /// nothing to resolve against rather than handed a guess.
+    pub fn base_dir(&self) -> Option<PathBuf> {
         self.path
             .as_deref()
             .and_then(Path::parent)
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     pub fn text(&self) -> &str {
@@ -145,7 +149,7 @@ mod tests {
 
         assert!(!doc.is_dirty());
         assert_eq!(doc.display_name(), "note.md");
-        assert_eq!(doc.base_dir(), dir);
+        assert_eq!(doc.base_dir(), Some(dir.clone()));
 
         doc.set_text("# Title\n\nbody\n");
         assert!(doc.is_dirty());
@@ -164,6 +168,17 @@ mod tests {
         assert!(doc.save().is_err());
     }
 
+    /// A buffer that has never been saved has no directory to resolve images
+    /// against, and says so rather than guessing at the working directory.
+    #[test]
+    fn an_unsaved_document_has_no_base_directory() {
+        let mut doc = Document::new();
+        assert_eq!(doc.base_dir(), None);
+
+        doc.set_text("![](a.png)");
+        assert_eq!(doc.base_dir(), None);
+    }
+
     #[test]
     fn repathing_follows_a_rename_without_touching_the_buffer() {
         let dir = std::env::temp_dir().join(format!("md-core-repath-{}", std::process::id()));
@@ -179,7 +194,7 @@ mod tests {
         assert_eq!(doc.path(), Some(after.as_path()));
         assert_eq!(doc.display_name(), "after.md");
         assert_eq!(doc.text(), "# body\n");
-        assert_eq!(doc.base_dir(), dir);
+        assert_eq!(doc.base_dir(), Some(dir.clone()));
         // The move did not make it dirty: the text still matches what was read.
         assert!(!doc.is_dirty());
 
