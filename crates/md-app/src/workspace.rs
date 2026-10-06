@@ -9,16 +9,24 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab as TabButton, TabBar};
-use gpui_kit::component::{ActiveTheme, WindowExt as _, v_flex};
+use gpui_kit::component::{ActiveTheme, IconName, Sizable as _, WindowExt as _, v_flex};
+// `when` and its neighbours come from GPUI's prelude rather than its root, and
+// the glob above only reaches the root.
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use md_core::fs;
 use md_core::recent::{self, RecentFiles};
-use md_core::{Document, export};
+use md_core::{Counts, Document, counts, export};
 
-use crate::actions::{CloseTab, ExportHtml, OpenFile, Quit, Save, SaveAs, SelectTab, ToggleTheme};
+use crate::actions::{
+    CloseTab, CloseTabAt, ExportHtml, OpenFile, OpenSettings, Quit, Save, SaveAs, SelectTab,
+    ToggleTheme,
+};
 use crate::settings::{self, AppSettings};
+use crate::settings_dialog;
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarRequest};
 use crate::tab::Tab;
 
@@ -65,6 +73,26 @@ pub struct Workspace {
     /// Held for the same reason: while the theme follows the system, this is
     /// what notices the system changing.
     _appearance: Subscription,
+    /// How big the active tab's document is, for the status bar.
+    ///
+    /// Kept here rather than read during rendering because a render only happens
+    /// when something asks for one, and a keystroke in the editor does not ask
+    /// the workspace for anything. This field is what the observation below
+    /// keeps in step, so the number on screen is the number in the document.
+    counts: Counts,
+    /// The observation of the active tab, replaced whenever the active tab
+    /// changes. Dropping a `Subscription` stops the callback, so the old one has
+    /// to be kept until its replacement is in place.
+    _active_tab: Option<Subscription>,
+    /// A handle on the workspace itself, worn by the root element.
+    ///
+    /// GPUI sends a key binding to the focused element and out to the window's
+    /// root from there, so every handler on this view is only reachable while
+    /// something inside it holds focus. With the last tab closed there is no
+    /// editor to hold it, and without this one the focus would be left pointing
+    /// at an element that is gone — every shortcut in the window would go
+    /// quiet, `Cmd+O` included.
+    focus_handle: FocusHandle,
 }
 
 impl Workspace {
@@ -92,6 +120,9 @@ impl Workspace {
             recents: recent::recent_path(),
             _sidebar_events,
             _appearance,
+            counts: Counts::default(),
+            _active_tab: None,
+            focus_handle: cx.focus_handle(),
         };
 
         // Before anything is opened this session, offer what was opened last
@@ -99,9 +130,12 @@ impl Workspace {
         // looks like too, so there is nothing to report either way.
         workspace.publish_recents(cx);
 
-        let mut starter = Document::new();
-        starter.set_text(STARTER_DOCUMENT);
-        workspace.open(starter, window, cx);
+        // `scratch` rather than `new` plus `set_text`: the seeded text is the
+        // buffer's own starting point, not an edit made to it. Built the other
+        // way round the starter tab is dirty before the window is even on
+        // screen — it wears a dot, and closing it asks whether to discard
+        // changes the user never made.
+        workspace.open(Document::scratch(STARTER_DOCUMENT), window, cx);
         workspace
     }
 
@@ -113,7 +147,52 @@ impl Workspace {
         let tab = cx.new(|cx| Tab::new(id, document, window, cx));
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+        self.watch_active(cx);
         cx.notify();
+    }
+
+    /// Follow the active tab's changes, so the status bar keeps up.
+    ///
+    /// Called wherever `active` moves — opening, selecting, closing — because
+    /// the observation is of one entity and has to be pointed at the new one.
+    /// The counts are refreshed here too: the new tab may hold a document of a
+    /// different size, and nothing else would notice until the next keystroke.
+    fn watch_active(&mut self, cx: &mut Context<Self>) {
+        let tab = self.tabs.get(self.active).cloned();
+        self._active_tab = tab.map(|tab| {
+            cx.observe(&tab, |this, _, cx| {
+                this.sync_counts(cx);
+                cx.notify();
+            })
+        });
+        self.sync_counts(cx);
+    }
+
+    /// Put the caret in whatever is in front.
+    ///
+    /// Called wherever `active` moves. A key binding reaches the workspace's own
+    /// handlers by way of the focused element, so leaving focus on a tab that
+    /// has just been closed does not merely lose the caret: it strands every
+    /// shortcut in the window, because the element that held focus is no longer
+    /// in the tree for GPUI to route through. With no tab left there is still
+    /// this view's own handle to fall back on.
+    fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = match self.tabs.get(self.active) {
+            Some(tab) => tab.read(cx).editor_focus(cx),
+            None => self.focus_handle.clone(),
+        };
+        window.focus(&focus, cx);
+    }
+
+    /// Recount the active tab's document.
+    fn sync_counts(&mut self, cx: &App) {
+        self.counts = match self.tabs.get(self.active) {
+            // The editor's buffer rather than the document's copy: the change
+            // subscription copies one to the other a frame later, and a count
+            // that lags the caret by a frame is a count that looks wrong.
+            Some(tab) => counts(&tab.read(cx).markdown(cx)),
+            None => Counts::default(),
+        };
     }
 
     /// Open the file at `path`, focusing it if a tab already shows it.
@@ -128,7 +207,7 @@ impl Workspace {
             .iter()
             .position(|tab| tab.read(cx).path() == Some(path.as_path()));
         if let Some(index) = already_open {
-            self.select(index, cx);
+            self.select(index, window, cx);
             // Still recorded. This is the document being worked on now, and the
             // recent list is about what was opened, not what was new.
             self.remember(&path, window, cx);
@@ -611,7 +690,7 @@ impl Workspace {
     fn confirm_delete(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.open_tab_for(&path, cx) {
             // Bring the tab up so the refusal points at something on screen.
-            self.select(index, cx);
+            self.select(index, window, cx);
             let name = file_label(&path);
             window.push_notification(
                 Notification::warning(format!(
@@ -701,11 +780,21 @@ impl Workspace {
 
     /// Close the active tab, asking first when it has unsaved edits.
     pub fn request_close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(self.active) else {
+        self.request_close(self.active, window, cx);
+    }
+
+    /// Close the tab at `index`, asking first when it has unsaved edits.
+    ///
+    /// Takes an index rather than acting on the active tab because the tab strip
+    /// draws a close button on every tab, and the one on a background tab has to
+    /// close that tab — not the one in front, and not the one whose text the
+    /// discard question would then be about.
+    pub fn request_close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else {
             return;
         };
         if !tab.read(cx).is_dirty() {
-            self.close_active(cx);
+            self.close(index, window, cx);
             return;
         }
 
@@ -715,7 +804,7 @@ impl Workspace {
             cx,
             format!("“{name}” has unsaved changes. Closing it will discard them."),
             "Discard",
-            Self::close_active,
+            move |workspace, window, cx| workspace.close(index, window, cx),
         );
     }
 
@@ -741,7 +830,7 @@ impl Workspace {
             cx,
             format!("{what} Quitting will discard them."),
             "Quit anyway",
-            |_, cx| cx.quit(),
+            |_, _, cx| cx.quit(),
         );
     }
 
@@ -750,18 +839,25 @@ impl Workspace {
     /// The dialog's callbacks are handed `&mut App`, not `Context<Workspace>`,
     /// so the workspace is reached through a weak handle. A strong one would
     /// close a reference cycle through the window root, which owns the dialog.
+    ///
+    /// `on_confirm` is handed a window as well, because what it does — closing
+    /// a tab — has to put the caret in whatever is left in front, and that is
+    /// something only a window can be asked to do.
     fn confirm_discard(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
         message: String,
         ok_text: &'static str,
-        on_confirm: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        on_confirm: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) {
         let workspace = cx.weak_entity();
+        // Carried across because the callback below is handed an app context,
+        // from which no window can be reached.
+        let handle = window.window_handle();
         // The dialog's builder is an `Fn`, not an `FnOnce` — it may in principle
-        // run more than once — so nothing may be moved out of it. Both captures
-        // are therefore cloned into the innermost closure instead.
+        // run more than once — so nothing may be moved out of it. All three
+        // captures are therefore cloned into the innermost closure instead.
         let on_confirm = Rc::new(on_confirm);
         window.open_alert_dialog(cx, move |alert, _, _| {
             let workspace = workspace.clone();
@@ -775,31 +871,57 @@ impl Workspace {
                 .on_ok(move |_, _, cx| {
                     // Whatever happens next, the dialog has served its purpose;
                     // leaving it up would only invite a second confirm.
-                    workspace
-                        .update(cx, |workspace, cx| on_confirm(workspace, cx))
+                    handle
+                        .update(cx, |_, window, cx| {
+                            workspace
+                                .update(cx, |workspace, cx| on_confirm(workspace, window, cx))
+                                .ok()
+                        })
                         .ok();
                     true
                 })
         });
     }
 
-    /// Close the active tab and fall back to its left-hand neighbour.
-    fn close_active(&mut self, cx: &mut Context<Self>) {
-        if self.tabs.is_empty() {
+    /// Close the tab at `index`, falling back to its left-hand neighbour.
+    ///
+    /// An out-of-range index is ignored rather than panicking: a close button
+    /// names its tab by position, and a click that arrives a frame after the tab
+    /// strip changed underneath it names a tab that is no longer there.
+    fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
             return;
         }
-        self.tabs.remove(self.active);
+        self.tabs.remove(index);
+
+        // Closing a tab to the left of the active one shifts it down, and the
+        // active tab has to shift with it — otherwise a close anywhere in the
+        // strip would silently move the user to a different document.
+        if index < self.active {
+            self.active -= 1;
+        }
         // `saturating_sub` covers the case where the last tab was closed and
         // `tabs` is now empty; `active` is simply not read again until a tab
         // is opened, and opening sets it.
         self.active = self.active.min(self.tabs.len().saturating_sub(1));
+
+        self.watch_active(cx);
+        // The tab that was in front has just gone, and with it the focus it
+        // held. Handing the caret to whatever took its place is what keeps the
+        // next keystroke — and the next shortcut — from going nowhere.
+        self.focus_active(window, cx);
         cx.notify();
     }
 
     /// Focus the tab at `index`, ignoring an out-of-range request.
-    pub fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub fn select(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() && index != self.active {
             self.active = index;
+            self.watch_active(cx);
+            // The tab that was in front is no longer rendered, so the focus it
+            // held is no longer anywhere in the tree. Without this the caret
+            // stays behind on a document the user can no longer see.
+            self.focus_active(window, cx);
             cx.notify();
         }
     }
@@ -809,14 +931,37 @@ impl Workspace {
         let buttons = self
             .tabs
             .iter()
-            .map(|tab| {
+            .enumerate()
+            .map(|(index, tab)| {
                 let tab = tab.read(cx);
-                let button = TabButton::new().label(tab.title());
-                if tab.is_dirty() {
-                    button.suffix(div().size(px(7.)).rounded_full().bg(dirty_dot))
-                } else {
-                    button
-                }
+                TabButton::new().label(tab.title()).suffix(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .when(tab.is_dirty(), |this| {
+                            this.child(div().size(px(7.)).rounded_full().bg(dirty_dot))
+                        })
+                        .child(
+                            Button::new(("close-tab", index))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Close)
+                                .tooltip("Close")
+                                .on_click(move |_, window, cx| {
+                                    // The click goes on bubbling up into the tab
+                                    // itself, whose handler would switch to the
+                                    // tab being closed — so closing a background
+                                    // tab would first bring it to the front. The
+                                    // button's own handler runs on the way out,
+                                    // innermost first, so stopping here is early
+                                    // enough to keep the cross from also being a
+                                    // click on the tab.
+                                    cx.stop_propagation();
+                                    window.dispatch_action(Box::new(CloseTabAt(index)), cx);
+                                }),
+                        ),
+                )
             })
             .collect::<Vec<_>>();
 
@@ -827,9 +972,9 @@ impl Workspace {
         let tabs = TabBar::new("tabs")
             .selected_index(self.active)
             .children(buttons)
-            .on_click(move |index, _, cx| {
+            .on_click(move |index, window, cx| {
                 workspace
-                    .update(cx, |workspace, cx| workspace.select(*index, cx))
+                    .update(cx, |workspace, cx| workspace.select(*index, window, cx))
                     .ok();
             });
 
@@ -884,6 +1029,59 @@ impl Workspace {
             .child(resizable_panel().size(px(220.)).child(self.sidebar.clone()))
             .child(resizable_panel().child(tab.clone()))
             .into_any_element()
+    }
+
+    /// The bar along the bottom: how much is in the document, and the way in to
+    /// the settings.
+    ///
+    /// The size is read from `self.counts` rather than from the active tab
+    /// because `self.counts` is the copy something keeps up to date; the tab's
+    /// own buffer is only read on the frames the workspace is asked to render,
+    /// and typing in the editor is not one of them.
+    ///
+    /// With no tabs open the left side is left empty rather than reading
+    /// "0 characters": a document that does not exist has no size, and a zero
+    /// would suggest one that is merely empty.
+    fn render_status_bar(&self) -> impl IntoElement {
+        StatusBar::new()
+            .left(div().when(!self.tabs.is_empty(), |this| {
+                this.child(counts_label(self.counts))
+            }))
+            // Dispatches rather than opening the dialog directly, so the click
+            // and the key binding take the same path — and so this method does
+            // not have to be the one holding the window.
+            .right(
+                Button::new("settings")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Settings)
+                    .label("Settings")
+                    .tooltip("Settings")
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
+            )
+    }
+}
+
+/// The numbers the status bar shows, written out.
+///
+/// Split out of the render so the wording can be checked without a window.
+fn counts_label(counts: Counts) -> String {
+    format!(
+        "{} · {}",
+        counted(counts.characters, "character"),
+        counted(counts.lines, "line")
+    )
+}
+
+/// `n` of `noun`, plural only when there is more than one.
+///
+/// Zero takes the plural — "0 characters" reads as a count where "0 character"
+/// reads as a mistake — and one is the only case that does not.
+fn counted(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
@@ -1111,14 +1309,25 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
+            .track_focus(&self.focus_handle)
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(|this, _: &Quit, window, cx| this.request_quit(window, cx)))
             .on_action(
                 cx.listener(|this, _: &CloseTab, window, cx| this.request_close_active(window, cx)),
             )
-            .on_action(cx.listener(|this, action: &SelectTab, _, cx| this.select(action.0, cx)))
+            .on_action(
+                cx.listener(|this, action: &SelectTab, window, cx| {
+                    this.select(action.0, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, action: &CloseTabAt, window, cx| {
+                this.request_close(action.0, window, cx)
+            }))
             .on_action(cx.listener(Self::toggle_theme))
+            .on_action(
+                cx.listener(|_, _: &OpenSettings, window, cx| settings_dialog::open(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save_active(window, cx)))
             .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save_as_active(window, cx)))
             .on_action(
@@ -1127,6 +1336,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.open_file(window, cx)))
             .child(self.render_tab_strip(cx))
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
+            .child(self.render_status_bar())
     }
 }
 
@@ -1134,8 +1344,8 @@ impl Render for Workspace {
 mod tests {
     // Imported narrowly: `use super::*` would drag in the `gpui_kit::*` glob,
     // whose `test` attribute macro shadows the built-in `#[test]`.
-    use super::{NameOutcome, NameTarget, STARTER_DOCUMENT, Workspace};
-    use crate::actions::{CloseTab, ExportHtml, OpenFile, SelectTab};
+    use super::{NameOutcome, NameTarget, STARTER_DOCUMENT, Workspace, counted, counts_label};
+    use crate::actions::{CloseTab, CloseTabAt, ExportHtml, OpenFile, OpenSettings, SelectTab};
     use crate::sidebar::SidebarRequest;
     use gpui_kit::base::Root;
     use gpui_kit::component::WindowExt as _;
@@ -1144,6 +1354,7 @@ mod tests {
         AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowHandle,
         WindowOptions, px, size,
     };
+    use md_core::Counts;
     use md_core::Document;
     use md_core::RecentFiles;
     use md_core::fs::NameError;
@@ -1277,15 +1488,28 @@ mod tests {
         assert_eq!(titles(cx, &workspace), ["Untitled", "a.md"]);
         assert_eq!(active(&workspace, cx), 1, "should fall back to the left");
 
-        // The remaining tab is the starter document, which has never been
-        // saved and so is dirty; `CloseTab` would prompt rather than close it.
-        // Drive the close directly to exercise the empty-strip edge case; the
-        // prompt itself is covered by `closing_a_dirty_tab_asks_before_discarding`.
-        workspace.update(cx, |workspace, cx| workspace.close_active(cx));
-        workspace.update(cx, |workspace, cx| workspace.close_active(cx));
-        assert!(titles(cx, &workspace).is_empty());
+        dispatch(window, CloseTab, cx);
+        assert_eq!(titles(cx, &workspace), ["Untitled"]);
+        assert_eq!(active(&workspace, cx), 0, "the neighbour took its place");
+
+        // What is left is the starter document, which has never been saved.
+        // That used to make it dirty — a fresh buffer whose text did not match
+        // the empty string it was measured against — so `CloseTab` asked to
+        // discard edits nobody had made, and the only way to reach the rest of
+        // this test was to call the close directly. It is a scratch document
+        // now, so the same key that closes every other tab closes this one.
+        dispatch(window, CloseTab, cx);
+        assert!(
+            titles(cx, &workspace).is_empty(),
+            "the starter tab has to close like any other"
+        );
+        assert!(
+            !has_dialog(window, cx),
+            "nothing was edited, so nothing should be asked"
+        );
+
         // Closing an already-empty strip is a no-op, not a panic.
-        workspace.update(cx, |workspace, cx| workspace.close_active(cx));
+        dispatch(window, CloseTab, cx);
         assert!(titles(cx, &workspace).is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
@@ -1904,9 +2128,17 @@ mod tests {
 
     /// The text the active tab's editor holds, read back through the entity.
     fn active_tab_text(workspace: &Entity<Workspace>, cx: &TestAppContext) -> String {
-        workspace.read_with(cx, |workspace, cx| {
-            workspace.tabs[workspace.active].read(cx).text(cx)
-        })
+        tab_text(
+            workspace,
+            workspace.read_with(cx, |workspace, _| workspace.active),
+            cx,
+        )
+    }
+
+    /// One named tab's buffer, so a test can say which document a keystroke
+    /// landed in rather than only that something was typed.
+    fn tab_text(workspace: &Entity<Workspace>, index: usize, cx: &TestAppContext) -> String {
+        workspace.read_with(cx, |workspace, cx| workspace.tabs[index].read(cx).text(cx))
     }
 
     fn active_tab_is_dirty(workspace: &Entity<Workspace>, cx: &TestAppContext) -> bool {
@@ -2162,5 +2394,184 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A window that has just opened has nothing to discard.
+    ///
+    /// The starter document is seeded as a scratch buffer, so its text is the
+    /// buffer's starting point rather than an edit made to it. Built the other
+    /// way round — `Document::new` and then `set_text` — the first thing the
+    /// user sees is a tab wearing a dirty dot, and the first `Cmd+W` asks about
+    /// changes they never made.
+    #[gpui_kit::test]
+    fn the_starter_tab_is_clean_and_closes(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        assert!(
+            !workspace.read_with(cx, |workspace, cx| workspace.tabs[0].read(cx).is_dirty()),
+            "the starter document is not an edit"
+        );
+
+        dispatch(window, CloseTab, cx);
+        assert!(titles(cx, &workspace).is_empty());
+        assert!(
+            !has_dialog(window, cx),
+            "there was nothing to ask about, so nothing should be asked"
+        );
+    }
+
+    /// The cross on a tab closes that tab, and does not first bring it forward:
+    /// a background tab can be closed without being moved into, and on a dirty
+    /// tab the discard question is about the document the cross belongs to.
+    #[gpui_kit::test]
+    fn closing_a_background_tab_leaves_the_active_one_where_it_was(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("close-background");
+        open_document(window, &workspace, clean_document(&dir, "a.md"), cx);
+        open_document(window, &workspace, clean_document(&dir, "b.md"), cx);
+        assert_eq!(active(&workspace, cx), 2);
+
+        dispatch(window, CloseTabAt(0), cx);
+
+        assert_eq!(titles(cx, &workspace), ["a.md", "b.md"]);
+        assert_eq!(
+            active(&workspace, cx),
+            1,
+            "the tab that went was to the left, so the index shifts down with it"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The status bar's numbers are the active buffer's, and they keep up as it
+    /// is typed in — the count is the editor's, not a copy taken at open time.
+    #[gpui_kit::test]
+    fn the_status_bar_counts_follow_the_active_document(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let before = workspace.read_with(cx, |workspace, _| workspace.counts);
+        assert!(
+            before.characters > 0,
+            "the starter document is not empty: {before:?}"
+        );
+
+        type_into_active_tab(window, &workspace, "xyzzy", cx);
+
+        let after = workspace.read_with(cx, |workspace, _| workspace.counts);
+        assert_eq!(
+            after.characters,
+            before.characters + 5,
+            "five characters were typed: {after:?}"
+        );
+    }
+
+    /// Switching tabs re-counts the document that came forward, rather than
+    /// leaving the previous one's numbers on screen.
+    #[gpui_kit::test]
+    fn switching_tabs_recounts_the_status_bar(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let starter = workspace.read_with(cx, |workspace, _| workspace.counts);
+        let dir = scratch("status-recount");
+        open_document(window, &workspace, clean_document(&dir, "a.md"), cx);
+
+        let opened = workspace.read_with(cx, |workspace, _| workspace.counts);
+        assert_ne!(opened, starter, "a different document, a different count");
+
+        dispatch(window, SelectTab(0), cx);
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.counts),
+            starter,
+            "going back has to re-count the tab that came forward"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The status bar's wording: one of a thing is not written in the plural,
+    /// and neither is none — "0 character" reads as a mistake, "0 characters"
+    /// reads as a count.
+    #[test]
+    fn the_counts_are_worded_for_one_and_for_many() {
+        assert_eq!(counted(0, "line"), "0 lines");
+        assert_eq!(counted(1, "line"), "1 line");
+        assert_eq!(counted(2, "line"), "2 lines");
+        assert_eq!(
+            counts_label(Counts {
+                characters: 1,
+                lines: 1
+            }),
+            "1 character · 1 line"
+        );
+        assert_eq!(counts_label(Counts::default()), "0 characters · 0 lines");
+    }
+
+    /// The status bar's button dispatches the same action `Cmd+,` is bound to,
+    /// so this covers both ways in: the action handler is what opens the dialog.
+    #[gpui_kit::test]
+    fn the_settings_action_opens_the_settings_dialog(cx: &mut TestAppContext) {
+        let (window, _) = open_workspace(cx);
+        assert!(
+            !has_dialog(window, cx),
+            "nothing should be open to start with"
+        );
+
+        dispatch::<OpenSettings>(window, OpenSettings, cx);
+        assert!(has_dialog(window, cx), "the settings dialog should be up");
+    }
+
+    /// Closing a tab hands the caret to the one that takes its place.
+    ///
+    /// Keyed in without focusing first, the way the user does it. This is not
+    /// only about losing a keystroke: GPUI reaches a view's action handlers by
+    /// way of the focused element, so a caret left on a tab that has just been
+    /// closed strands every shortcut in the window — the element that held the
+    /// focus is no longer in the tree to route through.
+    #[gpui_kit::test]
+    fn closing_a_tab_hands_the_caret_to_the_one_that_takes_its_place(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("close-focus");
+        open_document(window, &workspace, clean_document(&dir, "a.md"), cx);
+        open_document(window, &workspace, clean_document(&dir, "b.md"), cx);
+        let a_before = tab_text(&workspace, 1, cx);
+
+        // `b.md` was in front, so this closes it and puts `a.md` there instead.
+        dispatch(window, CloseTab, cx);
+        assert_eq!(titles(cx, &workspace), ["Untitled", "a.md"]);
+        assert_eq!(active(&workspace, cx), 1);
+
+        cx.update_window(window.into(), |_, window, cx| window.input("x", cx))
+            .unwrap();
+
+        let a_after = tab_text(&workspace, 1, cx);
+        assert!(
+            a_after.starts_with('x'),
+            "the caret should be at the top of a.md, but it reads {a_after:?}"
+        );
+        assert_eq!(a_after.len(), a_before.len() + 1);
+        assert!(
+            !tab_text(&workspace, 0, cx).starts_with('x'),
+            "the character went to a tab that is not in front"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With every tab closed there is still somewhere for a shortcut to land.
+    ///
+    /// Nothing in the workspace is left to hold the focus, and an action
+    /// dispatched with nothing focused is delivered to the window's root — one
+    /// level above this view, where none of its handlers are. The workspace's
+    /// own handle is what keeps `Cmd+O` and the rest working on an empty strip.
+    #[gpui_kit::test]
+    fn the_shortcuts_still_arrive_with_no_tabs_left(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+
+        dispatch(window, CloseTab, cx);
+        assert!(titles(cx, &workspace).is_empty());
+        assert!(!has_dialog(window, cx), "nothing should be open yet");
+
+        dispatch::<OpenSettings>(window, OpenSettings, cx);
+        assert!(
+            has_dialog(window, cx),
+            "the workspace has to stay reachable with an empty tab strip"
+        );
     }
 }

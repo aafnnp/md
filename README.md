@@ -155,6 +155,14 @@ The theme button at the right of the tab strip cycles **System → Light → Dar
 window follows the operating system and keeps following it when it changes; a light or dark choice
 holds until it is changed back. <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> does the same.
 
+<kbd>Cmd</kbd>+<kbd>,</kbd> — or the settings button at the right of the status bar — opens a panel
+over the window holding every setting described below. Each one applies the moment it is usable: a
+font size typed digit by digit takes effect at `1` and then again at `18`, and the panel says
+nothing in between, because `1` is a step on the way to a number rather than a mistake. Text that
+never becomes usable — `abc`, or a size well outside the range — is refused on the way out of the
+field, with the range spelled out, and the setting keeps the value it had. Nothing is silently
+clamped: a number you did not ask for is worse than one you are told about.
+
 Everything else is a small JSON file in the platform's per-user configuration directory, which is
 `~/Library/Application Support/dev.aafnnp.md/settings.json` on macOS. It is read once, at startup:
 
@@ -165,20 +173,44 @@ Everything else is a small JSON file in the platform's per-user configuration di
   "font_size": 16.0,
   "mono_font_family": "JetBrains Mono",
   "mono_font_size": 14.0,
-  "editor_max_width": 900.0
+  "editor_max_width": 900.0,
+  "preview_padding": 24.0
 }
 ```
 
 Every key but `theme` is optional, and leaving one out keeps the built-in default — so a file that
 only says `{"theme": "dark"}` is complete. Values out of range are pulled back into range rather
 than refused, an unreadable file falls back to the defaults, and unknown keys are ignored. Sizes
-outside 8–48 points and widths outside 320–4000 points are clamped.
+outside 8–48 points, widths outside 320–4000 points and padding outside 0–200 points are clamped.
+
+`preview_padding` is the margin the rendered document is set in. The default is 24 points rather
+than none: text flush against the pane's edge reads as though it has been cropped, and the preview
+is the one pane with nothing else to hold it off its border.
 
 The file is written when the theme changes, and that write is the whole of what the app knows: a file
 it could not parse was loaded as the defaults, and a key this build does not recognise was dropped on
 the way in. So the next theme change replaces the file with one holding just the settings this build
 understands. A hand-edit that broke the JSON is therefore not preserved for you to fix — it is
 overwritten. Keep a copy if anything in it mattered.
+
+## The status bar
+
+Along the bottom of the window: how much the active document holds, on the left, and the settings
+button on the right.
+
+The count reads `245 characters · 12 lines`, and it is taken from the editor's buffer rather than
+from a copy made when the file was opened — so it keeps up as you type, and re-counts the document
+that comes forward when you switch tabs. With every tab closed it says nothing at all rather than
+`0 characters`: a document that does not exist has no size, and a zero would suggest one that is
+merely empty.
+
+Characters are counted as Unicode scalar values, which is what `chars()` gives. Not bytes, which
+would report three for `中`, and not grapheme clusters, which need a Unicode property table to get
+right. The one thing to know is that an emoji built from a base and a modifier counts as two.
+
+There is deliberately no word count. Splitting on whitespace reports `一篇文章` as one word, so the
+number would be badly wrong for exactly the documents this editor is built to write, and a number
+that is wrong in a way the reader cannot see is worse than no number.
 
 ## Continuous integration
 
@@ -307,8 +339,11 @@ CHANGELOG.md   what each version changed — the release notes, not a summary of
       <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd>, from the editor component's own search
 - [x] **Open file and recent files** — <kbd>Cmd</kbd>+<kbd>O</kbd>, and the recent list the sidebar
       shows in place of the tree while no folder is open
-- [ ] **Next** — a settings panel instead of a hand-edited file, a native menu bar, and synchronised
-      scrolling if the editor's scroll extent ever becomes reachable (see [Known gaps](#known-gaps))
+- [x] **A settings panel and a status bar** — <kbd>Cmd</kbd>+<kbd>,</kbd> opens a panel over every
+      setting the file holds, the preview gains a margin, and the size of the active document is
+      reported along the bottom of the window
+- [ ] **Next** — a native menu bar, and synchronised scrolling if the editor's scroll extent ever
+      becomes reachable (see [Known gaps](#known-gaps))
 
 ## License
 

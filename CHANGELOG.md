@@ -23,6 +23,30 @@ publish a version that has no section. See [Releasing](#releasing) at the bottom
 - **Find and replace.** <kbd>Cmd</kbd>+<kbd>F</kbd> and
   <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> over the source pane, from the editor component's
   built-in search.
+- **A settings panel.** <kbd>Cmd</kbd>+<kbd>,</kbd>, or the settings button at the right of the
+  status bar, edits every setting the file holds — theme, both font families and sizes, the source
+  column's width and the preview's padding. Changes apply as they are made, and text that does not
+  yet mean a usable number is left alone until it does rather than clamped to something you did not
+  ask for.
+- **A status bar.** Along the bottom of the window: how much the active document holds, and the
+  button that opens the settings above.
+
+### Fixed
+
+- **The starter tab could not be closed.** A fresh window opened on an `Untitled` buffer that was
+  already dirty — its text was seeded into an empty buffer, and the two did not match — so
+  <kbd>Cmd</kbd>+<kbd>W</kbd> asked whether to discard edits nobody had made. It is now a scratch
+  document, clean from the moment it appears, and it closes like any other tab.
+- **Closing or switching tabs left the caret behind.** GPUI delivers a key binding through the
+  focused element, so a caret left on a tab that had just been closed did not only swallow the
+  typing: it stranded every shortcut in the window, <kbd>Cmd</kbd>+<kbd>O</kbd> included, because
+  the element that held the focus was no longer rendered. The caret now follows the document that
+  comes forward, and the workspace can hold it itself when the last tab closes.
+
+### Changed
+
+- **The preview has a margin.** Rendered text used to sit flush against the pane edge, which reads
+  as though it has been cropped. The default is 24 points, and it is one of the settings above.
 
 ## [0.1.0] - 2026-10-05
 

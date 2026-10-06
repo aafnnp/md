@@ -13,6 +13,7 @@ actions!(
         Quit,
         CloseTab,
         ToggleTheme,
+        OpenSettings,
         OpenFile,
         Save,
         SaveAs,
@@ -29,3 +30,13 @@ actions!(
 #[derive(Clone, PartialEq, Default, Debug, gpui_kit::Action)]
 #[action(namespace = md, no_json)]
 pub struct SelectTab(pub usize);
+
+/// Close the tab strip's `n`th tab, counting from zero.
+///
+/// A separate action from `SelectTab` because the close button on a tab has to
+/// close *that* tab rather than whichever one is in front — clicking the cross
+/// on a background tab should not first bring it forward, and on a dirty tab it
+/// must not leave the user answering a question about the wrong document.
+#[derive(Clone, PartialEq, Default, Debug, gpui_kit::Action)]
+#[action(namespace = md, no_json)]
+pub struct CloseTabAt(pub usize);

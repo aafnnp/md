@@ -36,6 +36,18 @@ impl AppSettings {
     }
 }
 
+/// The margin the preview leaves when the settings file does not name one.
+///
+/// Not zero. Rendered text set flush against the pane edge reads as though it
+/// has been cropped, and the preview is the one pane in the window with nothing
+/// else to hold the text off its border.
+pub const DEFAULT_PREVIEW_PADDING: f32 = 24.0;
+
+/// The space to leave around the rendered document, in pixels.
+pub fn preview_padding(settings: &Settings) -> f32 {
+    settings.preview_padding.unwrap_or(DEFAULT_PREVIEW_PADDING)
+}
+
 /// Put `settings` into force: the theme first, then the fonts.
 ///
 /// Two steps on purpose. `Theme::change` loads the registered theme for the
@@ -48,6 +60,16 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
         ThemePreference::Dark => Theme::change(ThemeMode::Dark, window, cx),
     }
 
+    apply_fonts(settings, cx);
+}
+
+/// Put the fonts into force, leaving the mode alone.
+///
+/// Split out of [`apply`] for the settings dialog, where a font size typed one
+/// digit at a time would otherwise reload the whole registered theme on every
+/// keystroke — and be handed no window to do it with, since the dialog's fields
+/// are watched through subscriptions, which carry no window.
+pub fn apply_fonts(settings: &Settings, cx: &mut App) {
     Theme::update(cx, |theme| {
         if let Some(family) = &settings.font_family {
             theme.font_family = family.clone().into();

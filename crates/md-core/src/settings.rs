@@ -20,10 +20,17 @@ pub const FILE_NAME: &str = "settings.json";
 /// The file is hand-editable, and a wrong size does not fail loudly: it lays
 /// out text that cannot be read, or that does not fit anywhere. Clamping turns
 /// a typo into a slightly wrong size rather than an unusable window.
-const FONT_SIZE_RANGE: (f32, f32) = (8.0, 48.0);
+pub const FONT_SIZE_RANGE: (f32, f32) = (8.0, 48.0);
 
 /// The same, for the width the source column is held to.
-const EDITOR_WIDTH_RANGE: (f32, f32) = (320.0, 4000.0);
+pub const EDITOR_WIDTH_RANGE: (f32, f32) = (320.0, 4000.0);
+
+/// The same, for the space left around the preview.
+///
+/// Zero is allowed — it is the one setting here whose minimum is a real choice
+/// rather than a mistake — and the upper bound is generous enough to push the
+/// text into a narrow column on a wide window, which is what the setting is for.
+pub const PREVIEW_PADDING_RANGE: (f32, f32) = (0.0, 200.0);
 
 /// Which theme the app should use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -93,6 +100,10 @@ pub struct Settings {
     /// them nothing to stop at. `None` lets the column fill its pane.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub editor_max_width: Option<f32>,
+    /// Space in pixels left between the rendered document and the edges of the
+    /// preview pane. `None` uses the app's own margin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_padding: Option<f32>,
 }
 
 impl Settings {
@@ -107,6 +118,7 @@ impl Settings {
         self.mono_font_family = family(self.mono_font_family);
         self.mono_font_size = size(self.mono_font_size, FONT_SIZE_RANGE);
         self.editor_max_width = size(self.editor_max_width, EDITOR_WIDTH_RANGE);
+        self.preview_padding = size(self.preview_padding, PREVIEW_PADDING_RANGE);
         self
     }
 
@@ -225,6 +237,7 @@ mod tests {
         assert_eq!(settings.mono_font_family, None);
         assert_eq!(settings.mono_font_size, None);
         assert_eq!(settings.editor_max_width, None);
+        assert_eq!(settings.preview_padding, None);
     }
 
     #[test]
@@ -252,6 +265,7 @@ mod tests {
             mono_font_family: Some("JetBrains Mono".to_string()),
             mono_font_size: Some(15.5),
             editor_max_width: Some(720.0),
+            preview_padding: Some(32.0),
         };
 
         settings.save_to(&path).unwrap();
@@ -289,6 +303,7 @@ mod tests {
         assert_eq!(settings.theme, ThemePreference::Dark);
         assert_eq!(settings.font_size, None);
         assert_eq!(settings.editor_max_width, None);
+        assert_eq!(settings.preview_padding, None);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -311,7 +326,8 @@ mod tests {
         let path = dir.join(FILE_NAME);
         std::fs::write(
             &path,
-            r#"{"font_size": 400, "mono_font_size": 1, "editor_max_width": 40}"#,
+            r#"{"font_size": 400, "mono_font_size": 1, "editor_max_width": 40,
+                "preview_padding": 900}"#,
         )
         .unwrap();
 
@@ -319,6 +335,20 @@ mod tests {
         assert_eq!(settings.font_size, Some(FONT_SIZE_RANGE.1));
         assert_eq!(settings.mono_font_size, Some(FONT_SIZE_RANGE.0));
         assert_eq!(settings.editor_max_width, Some(EDITOR_WIDTH_RANGE.0));
+        assert_eq!(settings.preview_padding, Some(PREVIEW_PADDING_RANGE.1));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Zero padding is a setting, not a mistake, so it has to survive the clamp
+    /// that pulls everything else back into range.
+    #[test]
+    fn no_preview_padding_is_kept_rather_than_dropped() {
+        let dir = scratch("zero-padding");
+        let path = dir.join(FILE_NAME);
+        std::fs::write(&path, r#"{"preview_padding": 0}"#).unwrap();
+
+        assert_eq!(Settings::load_from(&path).preview_padding, Some(0.0));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -365,6 +395,7 @@ mod tests {
         // read past to find the ones they changed.
         assert!(!text.contains("font_family"));
         assert!(!text.contains("editor_max_width"));
+        assert!(!text.contains("preview_padding"));
 
         std::fs::remove_dir_all(&dir).ok();
     }

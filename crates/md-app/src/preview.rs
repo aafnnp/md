@@ -11,6 +11,8 @@ use gpui_kit::*;
 
 use md_core::image;
 
+use crate::settings::{AppSettings, preview_padding};
+
 pub struct PreviewPane {
     state: Entity<TextViewState>,
     /// The Markdown currently on screen. Remembering it lets an unchanged
@@ -76,11 +78,15 @@ impl PreviewPane {
 }
 
 impl Render for PreviewPane {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The resolver is `'static`, so it owns its copy of the directory rather
         // than borrowing the pane.
         let base_dir = self.base_dir.clone();
-        div().size_full().child(
+        // Read on every frame rather than cached: the settings dialog can change
+        // this while the pane is on screen, and the frame after it does is when
+        // the new margin has to be there.
+        let padding = preview_padding(&AppSettings::current(cx));
+        div().size_full().p(px(padding)).child(
             TextView::new(&self.state)
                 .selectable(true)
                 .scrollable(true)

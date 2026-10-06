@@ -19,6 +19,27 @@ impl Document {
         Self::default()
     }
 
+    /// A never-saved document that starts holding `text` and starts clean.
+    ///
+    /// This is for a buffer the app seeded itself rather than one the user
+    /// typed into — the starter document a new window opens with. Going through
+    /// [`Self::new`] and [`Self::set_text`] instead leaves `saved_text` empty,
+    /// so the buffer is dirty from the first frame: the tab wears a dot for text
+    /// nobody wrote, and closing it asks whether to discard changes that were
+    /// never made.
+    ///
+    /// Not `open` and not `save_as`: nothing is written, and the document still
+    /// has no path, so it is still "Untitled" with no folder to resolve images
+    /// against until it is saved somewhere.
+    pub fn scratch(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            path: None,
+            saved_text: text.clone(),
+            text,
+        }
+    }
+
     /// Load a document from disk.
     pub fn open(path: impl Into<PathBuf>) -> std::io::Result<Self> {
         let path = path.into();
@@ -134,6 +155,32 @@ mod tests {
 
         // Writing the same text back to the saved value clears the flag.
         doc.set_text("");
+        assert!(!doc.is_dirty());
+    }
+
+    /// A seeded buffer is clean to begin with, which is what keeps a new
+    /// window's starter tab from asking to discard changes nobody made.
+    #[test]
+    fn a_scratch_document_holds_its_text_and_starts_clean() {
+        let doc = Document::scratch("# md\n");
+
+        assert_eq!(doc.text(), "# md\n");
+        assert!(!doc.is_dirty());
+        // Still an untitled buffer: seeding it is not saving it.
+        assert_eq!(doc.display_name(), "Untitled");
+        assert_eq!(doc.path(), None);
+        assert_eq!(doc.base_dir(), None);
+    }
+
+    #[test]
+    fn a_scratch_document_goes_dirty_once_it_is_edited() {
+        let mut doc = Document::scratch("# md\n");
+        doc.set_text("# md\n\nand more\n");
+        assert!(doc.is_dirty());
+
+        // And clean again when the text is put back, which is what makes the
+        // starter text a real baseline rather than a flag that was suppressed.
+        doc.set_text("# md\n");
         assert!(!doc.is_dirty());
     }
 

@@ -111,11 +111,12 @@ impl Tab {
         self.markdown(cx)
     }
 
-    /// A handle on the source pane, so a test can put the caret in it and type.
+    /// A handle on the source pane, so the caret can be put in it.
     ///
-    /// Gated like `text`: creating the tab already focuses its editor, so the
-    /// only caller that has to do it again is a test moving between tabs.
-    #[cfg(test)]
+    /// Creating the tab already focuses its editor. The workspace asks for this
+    /// again whenever the active tab changes — after a close, or a switch — so
+    /// the caret follows the document that came forward rather than staying on
+    /// one that is no longer rendered.
     pub fn editor_focus(&self, cx: &App) -> FocusHandle {
         self.editor.read(cx).state.read(cx).focus_handle(cx)
     }

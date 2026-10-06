@@ -4,6 +4,7 @@ mod actions;
 mod editor;
 mod preview;
 mod settings;
+mod settings_dialog;
 mod sidebar;
 mod tab;
 mod workspace;
@@ -11,7 +12,9 @@ mod workspace;
 use gpui_kit::*;
 use md_core::settings::Settings;
 
-use crate::actions::{CloseTab, ExportHtml, OpenFile, Quit, Save, SaveAs, SelectTab, ToggleTheme};
+use crate::actions::{
+    CloseTab, ExportHtml, OpenFile, OpenSettings, Quit, Save, SaveAs, SelectTab, ToggleTheme,
+};
 use crate::settings::AppSettings;
 use crate::workspace::Workspace;
 
@@ -52,6 +55,8 @@ fn main() {
                 KeyBinding::new("cmd-s", Save, None),
                 KeyBinding::new("cmd-shift-s", SaveAs, None),
                 KeyBinding::new("cmd-shift-e", ExportHtml, None),
+                // The same key every macOS app puts its preferences on.
+                KeyBinding::new("cmd-,", OpenSettings, None),
             ]);
             cx.bind_keys(tab_shortcuts());
             gpui_kit::open_window(window_options, cx, |window, cx| {
