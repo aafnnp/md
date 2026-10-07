@@ -11,6 +11,12 @@ pub struct Document {
     /// Text as it was last read from or written to disk, used to decide
     /// whether the buffer is dirty and to support revert.
     saved_text: String,
+    /// Which numbered untitled buffer this is.
+    ///
+    /// `None` is "no number", which is the first untitled tab — it shows as a
+    /// bare `Untitled`. The number only counts while there is no path; see
+    /// [`Self::untitled_number`].
+    untitled: Option<u32>,
 }
 
 impl Document {
@@ -37,6 +43,7 @@ impl Document {
             path: None,
             saved_text: text.clone(),
             text,
+            untitled: None,
         }
     }
 
@@ -48,7 +55,29 @@ impl Document {
             path: Some(path),
             saved_text: text.clone(),
             text,
+            // A file that came off disk has a name, so it never holds a number.
+            untitled: None,
         })
+    }
+
+    /// Give this untitled buffer a number, for the tab strip.
+    ///
+    /// A builder rather than a setter so a document can be numbered in the same
+    /// expression that creates it, before it is handed to a tab.
+    pub fn numbered(mut self, number: u32) -> Self {
+        self.untitled = Some(number);
+        self
+    }
+
+    /// The number this buffer wears on the tab strip, but only while it has
+    /// never been saved.
+    ///
+    /// `None` once there is a path: the file has a name of its own now, and the
+    /// number is retired. Without that, closing `Untitled 2` and asking for
+    /// another buffer would hand out `2` again while a *named* file is still
+    /// holding it.
+    pub fn untitled_number(&self) -> Option<u32> {
+        self.path.is_none().then_some(self.untitled).flatten()
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -126,12 +155,19 @@ impl Document {
     }
 
     /// Name to show on the tab: the file name, or `Untitled` when never saved.
+    ///
+    /// Untitled buffers are numbered so several of them can be told apart:
+    /// `Untitled`, `Untitled 2`, `Untitled 3`. The first carries no number —
+    /// the convention is "the first one is plain", not "the first one is
+    /// `Untitled 1`".
     pub fn display_name(&self) -> String {
-        self.path
-            .as_deref()
-            .and_then(Path::file_name)
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Untitled".to_string())
+        if let Some(name) = self.path.as_deref().and_then(Path::file_name) {
+            return name.to_string_lossy().into_owned();
+        }
+        match self.untitled {
+            Some(number) if number > 1 => format!("Untitled {number}"),
+            _ => "Untitled".to_string(),
+        }
     }
 }
 
@@ -224,6 +260,43 @@ mod tests {
 
         doc.set_text("![](a.png)");
         assert_eq!(doc.base_dir(), None);
+    }
+
+    /// Several untitled buffers open at once have to be told apart on the tab
+    /// strip. The first is plain `Untitled`; the rest carry their number.
+    #[test]
+    fn numbering_an_untitled_document_shows_it_on_the_tab() {
+        assert_eq!(Document::new().numbered(1).display_name(), "Untitled");
+        assert_eq!(Document::new().numbered(2).display_name(), "Untitled 2");
+        assert_eq!(Document::new().numbered(3).display_name(), "Untitled 3");
+
+        // And the number is readable back, which is what lets the workspace
+        // find the lowest one still free.
+        assert_eq!(Document::new().numbered(2).untitled_number(), Some(2));
+        assert_eq!(Document::new().untitled_number(), None);
+    }
+
+    /// A number is only for a buffer with no name. Once the document is saved
+    /// it retires, so a later buffer can take the number without colliding
+    /// with a file that is holding it.
+    #[test]
+    fn saving_retires_the_untitled_number() {
+        let dir = std::env::temp_dir().join(format!("md-core-number-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.md");
+
+        let mut doc = Document::new().numbered(2);
+        assert_eq!(doc.display_name(), "Untitled 2");
+
+        doc.save_as(&path).unwrap();
+        assert_eq!(doc.display_name(), "note.md");
+        assert_eq!(
+            doc.untitled_number(),
+            None,
+            "a named file must not go on holding a number"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

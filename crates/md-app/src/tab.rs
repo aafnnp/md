@@ -127,6 +127,15 @@ impl Tab {
         self.document.is_dirty()
     }
 
+    /// Which numbered untitled buffer this is, if it is one at all.
+    ///
+    /// Forwarded because the workspace hands out the numbers, and `document` is
+    /// private to this module — the same reason `title` and `is_dirty` above
+    /// are here rather than read straight off the field.
+    pub fn untitled_number(&self) -> Option<u32> {
+        self.document.untitled_number()
+    }
+
     /// The file this tab is editing, if it was opened from or saved to one.
     ///
     /// A tab with no path is an untitled buffer, and cannot be the tab that

@@ -28,8 +28,8 @@ use md_core::typeset::{self, Platform, Style};
 use md_core::{Counts, Document, counts, export};
 
 use crate::actions::{
-    CloseTab, CloseTabAt, CopyLayout, ExportHtml, OpenFile, OpenSettings, Quit, Save, SaveAs,
-    SelectTab, SetStyle, SetTypesetting, ToggleTheme,
+    CloseTab, CloseTabAt, CopyLayout, ExportHtml, NewDocument, OpenFile, OpenSettings, Quit, Save,
+    SaveAs, SelectTab, SetStyle, SetTypesetting, ToggleTheme,
 };
 use crate::clipboard;
 use crate::settings::{self, AppSettings};
@@ -142,8 +142,41 @@ impl Workspace {
         // way round the starter tab is dirty before the window is even on
         // screen — it wears a dot, and closing it asks whether to discard
         // changes the user never made.
-        workspace.open(Document::scratch(STARTER_DOCUMENT), window, cx);
+        // Numbered 1: it is the first untitled buffer, and the one that shows
+        // as a bare `Untitled`. Without the number, the first `Cmd+N` would
+        // scan the strip, find no number taken, pick 1 — and produce a second
+        // tab also reading `Untitled`.
+        workspace.open(Document::scratch(STARTER_DOCUMENT).numbered(1), window, cx);
         workspace
+    }
+
+    /// Start an empty, unnamed buffer.
+    ///
+    /// Nothing touches the disk: the name and the folder are asked for at the
+    /// first `Cmd+S`. This is the only way to begin a document once the last
+    /// tab has been closed, so it must not depend on the sidebar, on a folder
+    /// being open, or on a dialog.
+    fn new_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let number = self.next_untitled(cx);
+        self.open(Document::new().numbered(number), window, cx);
+    }
+
+    /// The lowest untitled number not currently in use.
+    ///
+    /// The lowest free one rather than a counter that only ever climbs, so that
+    /// closing `Untitled 2` and asking for another buffer gets `2` back instead
+    /// of a number that keeps running away.
+    fn next_untitled(&self, cx: &App) -> u32 {
+        let taken: Vec<u32> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.read(cx).untitled_number())
+            .collect();
+        let mut number = 1;
+        while taken.contains(&number) {
+            number += 1;
+        }
+        number
     }
 
     /// Open a document in a new tab and focus it.
@@ -1008,6 +1041,18 @@ impl Workspace {
             .flex()
             .items_center()
             .child(div().flex_1().min_w_0().child(tabs))
+            // Between the strip and the theme toggle: starting a document is a
+            // thing you reach for while tabs are open, and the strip is the row
+            // that is always there — the empty state's button only exists once
+            // every tab has been closed.
+            .child(
+                Button::new("new-tab")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Plus)
+                    .tooltip("New file")
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(NewDocument), cx)),
+            )
             .child(
                 Button::new("theme-toggle")
                     .ghost()
@@ -1161,20 +1206,57 @@ impl Workspace {
     }
 
     fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(tab) = self.tabs.get(self.active) else {
-            return div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child("No open documents")
-                .into_any_element();
+        // The sidebar stays mounted either way. With no tab open it holds the
+        // only surviving ways to open a file or a folder, and taking it down
+        // along with the last tab is exactly what made an empty strip a dead
+        // end: one line of grey text and nothing to click.
+        let right: AnyElement = match self.tabs.get(self.active) {
+            Some(tab) => tab.clone().into_any_element(),
+            None => self.render_empty_state(cx),
         };
 
         h_resizable("workspace")
             .child(resizable_panel().size(px(220.)).child(self.sidebar.clone()))
-            .child(resizable_panel().child(tab.clone()))
+            .child(resizable_panel().child(right))
+            .into_any_element()
+    }
+
+    /// What fills the right-hand panel once every tab is closed.
+    ///
+    /// It only points the way: the real entry points sit in the sidebar header
+    /// beside it. This copy is here because with the panel empty the eye lands
+    /// in the middle of the window rather than on the edge.
+    ///
+    /// Both buttons dispatch rather than calling in, so the click and the key
+    /// binding take one path.
+    fn render_empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .text_color(cx.theme().muted_foreground)
+            .child("No open documents")
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("empty-new")
+                            .icon(IconName::Plus)
+                            .label("New file")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(NewDocument), cx)
+                            }),
+                    )
+                    .child(
+                        Button::new("empty-open")
+                            .icon(IconName::FileText)
+                            .label("Open file…")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(OpenFile), cx)
+                            }),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -1605,6 +1687,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::set_typesetting))
             .on_action(cx.listener(Self::set_style))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.open_file(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &NewDocument, window, cx| this.new_document(window, cx)),
+            )
             .child(self.render_tab_strip(cx))
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
             .child(self.render_status_bar(cx))
@@ -1618,7 +1703,9 @@ mod tests {
     use super::{
         NameOutcome, NameTarget, STARTER_DOCUMENT, Workspace, counted, counts_label, exported_note,
     };
-    use crate::actions::{CloseTab, CloseTabAt, ExportHtml, OpenFile, OpenSettings, SelectTab};
+    use crate::actions::{
+        CloseTab, CloseTabAt, ExportHtml, NewDocument, OpenFile, OpenSettings, SelectTab,
+    };
     use crate::settings::AppSettings;
     use crate::sidebar::SidebarRequest;
     use gpui_kit::base::Root;
@@ -2961,6 +3048,59 @@ mod tests {
         assert!(
             has_dialog(window, cx),
             "the workspace has to stay reachable with an empty tab strip"
+        );
+    }
+
+    /// The whole point of `Cmd+N`: once the last tab has gone, it is the only
+    /// way left to start a document.
+    ///
+    /// Built the way the user gets there — close the starter tab, then ask for
+    /// a new one — because the interesting part is that nothing is open at the
+    /// moment it is dispatched.
+    #[gpui_kit::test]
+    fn a_new_document_can_be_started_with_every_tab_closed(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+
+        dispatch(window, CloseTab, cx);
+        assert!(titles(cx, &workspace).is_empty());
+
+        dispatch::<NewDocument>(window, NewDocument, cx);
+
+        assert_eq!(titles(cx, &workspace), ["Untitled"]);
+        assert_eq!(active(&workspace, cx), 0);
+        assert!(
+            !active_tab_is_dirty(&workspace, cx),
+            "an empty new buffer is clean, so closing it asks nothing"
+        );
+        assert!(
+            !has_dialog(window, cx),
+            "a new document has no name yet; nothing should be asking for one"
+        );
+    }
+
+    /// Untitled buffers are numbered so several can be told apart, and a number
+    /// is handed out again once the tab holding it is gone.
+    #[gpui_kit::test]
+    fn untitled_tabs_are_numbered_and_numbers_are_reused(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+
+        dispatch::<NewDocument>(window, NewDocument, cx);
+        dispatch::<NewDocument>(window, NewDocument, cx);
+        assert_eq!(
+            titles(cx, &workspace),
+            ["Untitled", "Untitled 2", "Untitled 3"]
+        );
+
+        // Close `Untitled 2` — the middle one, so the number is not simply the
+        // one at the end of the strip.
+        dispatch(window, CloseTabAt(1), cx);
+        assert_eq!(titles(cx, &workspace), ["Untitled", "Untitled 3"]);
+
+        dispatch::<NewDocument>(window, NewDocument, cx);
+        assert_eq!(
+            titles(cx, &workspace),
+            ["Untitled", "Untitled 3", "Untitled 2"],
+            "the freed number should come back rather than the count climbing"
         );
     }
 }

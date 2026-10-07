@@ -6,12 +6,12 @@ framework from Zed, using the [gpui-kit](https://github.com/longbridge/gpui-kit)
 Two panes: write Markdown on the left, see it rendered on the right, live as you type.
 
 > **Status: early.** M0–M5 are done, apart from clickable task-list checkboxes (see
-> [Known gaps](#known-gaps)). The editor opens, edits, finds, renders, saves and exports Markdown in
-> two panes, keeps the preview in step with the source as it scrolls, keeps tabs and a file tree
-> alongside a list of recently opened files, resolves images relative to the document, lays a
-> document out for 公众号 / 头条 / 小红书 / 知乎 in one of three typographic styles to be exported or
-> copied as rich text, and remembers its theme. Tagged pushes are packaged for macOS, Windows and
-> Linux — see [Releases](#releases).
+> [Known gaps](#known-gaps)). The editor opens, starts, edits, finds, renders, saves and exports
+> Markdown in two panes, keeps the preview in step with the source as it scrolls, keeps tabs and a
+> file tree alongside a list of recently opened files, resolves images relative to the document,
+> lays a document out for 公众号 / 头条 / 小红书 / 知乎 in one of three typographic styles to be
+> exported or copied as rich text, and remembers its theme. Tagged pushes are packaged for macOS,
+> Windows and Linux — see [Releases](#releases).
 
 ## Stack
 
@@ -90,6 +90,27 @@ a file used to be.
 The list is `recent.json` in the configuration directory, beside the settings file, and holds the
 twenty most recent paths. Opening a file that is already open still records it — the list is about
 what was opened, not what was new.
+
+## Starting a new file
+
+<kbd>Cmd</kbd>+<kbd>N</kbd> starts a document, as does the <kbd>+</kbd> at the right of the tab
+strip, or **New file** in the middle of the window once every tab has been closed.
+
+What it makes is a buffer in memory with no name and no file behind it. Nothing is written until
+<kbd>Cmd</kbd>+<kbd>S</kbd>, which asks for the name and the folder at that point — so a new
+document needs no folder to be open, and one you decide against costs nothing on disk. Being empty
+and unnamed, it starts clean: <kbd>Cmd</kbd>+<kbd>W</kbd> closes it without asking whether to
+discard changes, because there are none to discard.
+
+Untitled buffers are numbered so that several can be told apart — `Untitled`, `Untitled 2`,
+`Untitled 3` — and the first is plain rather than `Untitled 1`. The number is the **lowest one not
+in use**, so closing `Untitled 2` and starting another gives `2` back instead of a count that only
+climbs. Saving retires the number: once a buffer has a file name it stops holding it, which is what
+keeps a new buffer from being handed a number a named file is still using.
+
+With every tab closed, the sidebar stays where it is — it holds the only remaining ways to open a
+file or a folder, and the empty panel beside it repeats the two useful ones so the eye, which lands
+in the middle of the window rather than at the edge, finds them there.
 
 ## Finding and replacing
 
@@ -445,6 +466,8 @@ CHANGELOG.md   what each version changed — the release notes, not a summary of
       <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>'s rich-text copy, with relative images inlined
 - [x] **Synchronised scrolling and typographic styles** — the preview follows the source pane
       proportionally, and a layout can be dressed as 默认 / 简约 / 杂志
+- [x] **New documents** — <kbd>Cmd</kbd>+<kbd>N</kbd>, the <kbd>+</kbd> on the tab strip, and a
+      button that is still there once the last tab has been closed
 - [ ] **Next** — a native menu bar
 
 ## License

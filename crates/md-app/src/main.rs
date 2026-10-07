@@ -14,8 +14,8 @@ use gpui_kit::*;
 use md_core::settings::Settings;
 
 use crate::actions::{
-    CloseTab, CopyLayout, ExportHtml, OpenFile, OpenSettings, Quit, Save, SaveAs, SelectTab,
-    ToggleTheme,
+    CloseTab, CopyLayout, ExportHtml, NewDocument, OpenFile, OpenSettings, Quit, Save, SaveAs,
+    SelectTab, ToggleTheme,
 };
 use crate::settings::AppSettings;
 use crate::workspace::Workspace;
@@ -54,6 +54,7 @@ fn main() {
                 KeyBinding::new("cmd-w", CloseTab, None),
                 KeyBinding::new("cmd-shift-t", ToggleTheme, None),
                 KeyBinding::new("cmd-o", OpenFile, None),
+                KeyBinding::new("cmd-n", NewDocument, None),
                 KeyBinding::new("cmd-s", Save, None),
                 KeyBinding::new("cmd-shift-s", SaveAs, None),
                 KeyBinding::new("cmd-shift-e", ExportHtml, None),

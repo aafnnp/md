@@ -54,6 +54,14 @@ publish a version that has no section. See [Releasing](#releasing) at the bottom
   out, rather than clamping it to something you did not ask for.
 - **A status bar.** Along the bottom of the window: how much the active document holds, and the
   button that opens the settings above.
+- **New documents.** <kbd>Cmd</kbd>+<kbd>N</kbd>, the <kbd>+</kbd> at the right of the tab strip, or
+  **New file** in the middle of the window once every tab has closed. What it makes is a buffer in
+  memory: nothing touches the disk until <kbd>Cmd</kbd>+<kbd>S</kbd>, which asks for the name and
+  the folder then. So a new document needs no folder open, and it starts clean, which means
+  <kbd>Cmd</kbd>+<kbd>W</kbd> closes it without asking about changes nobody made. Untitled buffers
+  are numbered — `Untitled`, `Untitled 2`, `Untitled 3` — by the lowest number not in use, so
+  closing `Untitled 2` and starting another gives `2` back, and saving retires the number so a new
+  buffer cannot take one a named file is still holding.
 
 ### Fixed
 
@@ -71,6 +79,12 @@ publish a version that has no section. See [Releasing](#releasing) at the bottom
   already dirty — its text was seeded into an empty buffer, and the two did not match — so
   <kbd>Cmd</kbd>+<kbd>W</kbd> asked whether to discard edits nobody had made. It is now a scratch
   document, clean from the moment it appears, and it closes like any other tab.
+- **Closing the last tab left nothing to start from.** `render_body` returned early when no tab was
+  in front, and what it returned early *from* was the whole split — sidebar included. So an empty
+  strip took the **Open file** and **Open folder** buttons down with it and left one line of grey
+  text, with the only remaining way to create a file being the tree's right-click menu, which needs
+  a folder open to exist in the first place. The sidebar is now mounted whether or not a tab is
+  open, and the panel beside it names the two ways forward.
 - **Closing or switching tabs left the caret behind.** GPUI delivers a key binding through the
   focused element, so a caret left on a tab that had just been closed did not only swallow the
   typing: it stranded every shortcut in the window, <kbd>Cmd</kbd>+<kbd>O</kbd> included, because

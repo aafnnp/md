@@ -16,6 +16,7 @@ actions!(
         ToggleTheme,
         OpenSettings,
         OpenFile,
+        NewDocument,
         Save,
         SaveAs,
         ExportHtml,
