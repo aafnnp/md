@@ -12,17 +12,25 @@
 //! for. It also means there is nothing to cancel, which is why the dialog has
 //! one button.
 //!
-//! Text that cannot be used is refused rather than repaired. [`Settings`]
-//! clamps on load, because a file is read once and never watched, so a value
-//! far out of range has to be quietly pulled back or it poisons every layout it
-//! reaches. Somebody typing is watching, though, and can be told the range
-//! instead of being shown a field that reads 400 while the setting holds 48.
+//! Everything that can be offered as a list is offered as a list. A font is a
+//! name the user would otherwise have to already know, and a wrong one is not
+//! refused by anything — it goes to the text system and comes back as whatever
+//! the platform falls back to, so the only feedback is that nothing changed.
+//! The two families and the two sizes are therefore chosen from what the system
+//! and the settings' own range can actually produce.
+//!
+//! What is still typed is refused rather than repaired. [`Settings`] clamps on
+//! load, because a file is read once and never watched, so a value far out of
+//! range has to be quietly pulled back or it poisons every layout it reaches.
+//! Somebody typing is watching, though, and can be told the range instead of
+//! being shown a field that reads 400 while the setting holds 48.
 
 use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme, WindowExt as _, v_flex};
+use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
+use gpui_kit::component::{ActiveTheme, IndexPath, WindowExt as _, v_flex};
 use gpui_kit::*;
 use md_core::settings::{
     EDITOR_WIDTH_RANGE, FONT_SIZE_RANGE, PREVIEW_PADDING_RANGE, Settings, ThemePreference,
@@ -70,8 +78,8 @@ pub fn open(window: &mut Window, cx: &mut App) {
 struct SettingsForm {
     /// The settings as edited. Written through on every change.
     settings: Settings,
-    family: Entity<InputState>,
-    mono_family: Entity<InputState>,
+    /// One entry per list-backed setting, in the order they are shown.
+    choices: Vec<ChoiceField>,
     /// One entry per numeric setting, in the order they are shown.
     numbers: Vec<NumberField>,
     /// The last field left holding something unusable, and what is wrong with
@@ -89,28 +97,194 @@ struct SettingsForm {
     _subscriptions: Vec<Subscription>,
 }
 
-/// A numeric setting: the ones with a name, a range, and a field to type in.
+/// A setting chosen from a list rather than typed.
+///
+/// The counterpart to [`Field`]: these are the settings whose values can be
+/// enumerated, so the dialog can offer them instead of asking the user to spell
+/// them. A wrong font name is the reason the enum exists at all — nothing
+/// downstream rejects one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Field {
+enum Choice {
+    FontFamily,
+    MonoFontFamily,
     FontSize,
     MonoFontSize,
+}
+
+impl Choice {
+    /// Every list-backed setting, in the order the dialog shows them.
+    const ALL: [Self; 4] = [
+        Self::FontFamily,
+        Self::MonoFontFamily,
+        Self::FontSize,
+        Self::MonoFontSize,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::FontFamily => "Interface font",
+            Self::MonoFontFamily => "Source font",
+            Self::FontSize => "Interface font size",
+            Self::MonoFontSize => "Source font size",
+        }
+    }
+
+    /// What the setting holds, as the text the dropdown lists it under.
+    ///
+    /// `None` is the theme's own choice, the same thing an absent key in the
+    /// file means — which is why the clear button can be offered as the way
+    /// back to it.
+    fn read(self, settings: &Settings) -> Option<String> {
+        match self {
+            Self::FontFamily => settings.font_family.clone(),
+            Self::MonoFontFamily => settings.mono_font_family.clone(),
+            Self::FontSize => settings.font_size.map(|size| size.to_string()),
+            Self::MonoFontSize => settings.mono_font_size.map(|size| size.to_string()),
+        }
+    }
+
+    /// Take a value back from the dropdown.
+    ///
+    /// A size that will not parse is treated as `None` rather than refused.
+    /// Every entry the dropdown offers came from [`options`], so text that is
+    /// not a number can only be a bug here, and a size the app cannot lay out
+    /// with is better dropped than stored.
+    fn write(self, settings: &mut Settings, value: Option<&str>) {
+        let value = value.map(str::trim).filter(|text| !text.is_empty());
+        match self {
+            Self::FontFamily => settings.font_family = value.map(str::to_owned),
+            Self::MonoFontFamily => settings.mono_font_family = value.map(str::to_owned),
+            Self::FontSize => settings.font_size = value.and_then(|text| text.parse().ok()),
+            Self::MonoFontSize => {
+                settings.mono_font_size = value.and_then(|text| text.parse().ok())
+            }
+        }
+    }
+
+    /// The line under the dropdown.
+    ///
+    /// Neither half is guessable: an empty dropdown could plausibly mean the
+    /// first entry, and nothing on screen says the source font list is not
+    /// restricted to monospaced families.
+    fn hint(self) -> &'static str {
+        match self {
+            Self::FontFamily => "Every family the system has · blank uses the platform's own",
+            Self::MonoFontFamily => {
+                "Every family the system has, not only the monospaced ones · blank uses the platform's monospaced font"
+            }
+            Self::FontSize | Self::MonoFontSize => "Whole points · blank uses the theme's size",
+        }
+    }
+}
+
+/// The values a dropdown offers.
+///
+/// The setting's current value is in the list even when it is not one of the
+/// ones offered. A file can hold a size of `13.5`, or the name of a font that
+/// has since been uninstalled, and both are values the app is honouring — a
+/// dropdown that could not show one would sit blank above a setting that still
+/// holds it, and would replace it the first time anything else was chosen.
+fn options(choice: Choice, fonts: &[String], current: Option<&str>) -> Vec<String> {
+    let mut items: Vec<String> = match choice {
+        // The text system's own list, already sorted and deduplicated. Which
+        // of these are monospaced is not something it reports, and asking
+        // would mean laying out text in several hundred families to compare
+        // their widths.
+        Choice::FontFamily | Choice::MonoFontFamily => fonts.to_vec(),
+        Choice::FontSize | Choice::MonoFontSize => size_options()
+            .into_iter()
+            .map(|size| size.to_string())
+            .collect(),
+    };
+
+    let Some(current) = current.filter(|value| !items.iter().any(|item| item == value)) else {
+        return items;
+    };
+
+    // In its place rather than at the end: the list is something to read down,
+    // and a value out of order reads as a mistake.
+    let at = match choice {
+        Choice::FontFamily | Choice::MonoFontFamily => items
+            .binary_search_by(|item| item.as_str().cmp(current))
+            .unwrap_or_else(|at| at),
+        // By number, not by text: 13.5 belongs between 13 and 14, and "13.5"
+        // sorts before "13" as a string.
+        Choice::FontSize | Choice::MonoFontSize => match current.parse::<f32>() {
+            Ok(value) => size_options().partition_point(|size| *size < value),
+            Err(_) => items.len(),
+        },
+    };
+    items.insert(at, current.to_owned());
+    items
+}
+
+/// Every whole point the file will keep.
+///
+/// The rendered list and the position a hand-edited value is inserted at have
+/// to agree, so both come from here rather than one of them being written out
+/// again.
+fn size_options() -> Vec<f32> {
+    let (min, max) = FONT_SIZE_RANGE;
+    (min.ceil() as i32..=max.floor() as i32)
+        .map(|size| size as f32)
+        .collect()
+}
+
+/// One list-backed setting's dropdown.
+struct ChoiceField {
+    choice: Choice,
+    select: Entity<SelectState<SearchableVec<String>>>,
+}
+
+impl ChoiceField {
+    /// The dropdown and the line under it.
+    ///
+    /// No complaint can appear here, unlike under a typed field: everything the
+    /// list offers is a value the app can use, and the control cannot be made
+    /// to hold anything else.
+    fn control(&self, cx: &App) -> impl IntoElement {
+        v_flex()
+            .gap_1()
+            .child(
+                Select::new(&self.select)
+                    // The clear button is the way back to the theme's own font or
+                    // size. It is drawn only once something is chosen, so a
+                    // dropdown nobody has touched shows no ✕ that could be misread
+                    // as meaning nothing was chosen.
+                    .cleanable(true)
+                    // The label sits above the control rather than beside it, so
+                    // without this the select would announce itself as an unnamed
+                    // button holding a font name.
+                    .accessibility_label(self.choice.name())
+                    .search_placeholder("Search")
+                    // Tall enough to scroll through a run of families, short
+                    // enough to leave the dialog looking like a dialog — and the
+                    // search box is what makes the difference, since a menu that
+                    // can be filtered does not need to be long.
+                    .menu_max_h(px(320.)),
+            )
+            .child(note(self.choice.hint(), None, cx))
+    }
+}
+
+/// A numeric setting: the ones with a name, a range, and a field to type in.
+///
+/// Only the two free-form settings are left. A column width and a margin are
+/// numbers with no list worth offering — any value in the range is a real
+/// choice — whereas the font sizes were whole points drawn from a fixed range,
+/// and are [`Choice`]s now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Field {
     EditorWidth,
     PreviewPadding,
 }
 
 impl Field {
     /// Every numeric setting, in the order the dialog shows them.
-    const ALL: [Self; 4] = [
-        Self::FontSize,
-        Self::MonoFontSize,
-        Self::EditorWidth,
-        Self::PreviewPadding,
-    ];
+    const ALL: [Self; 2] = [Self::EditorWidth, Self::PreviewPadding];
 
     fn name(self) -> &'static str {
         match self {
-            Self::FontSize => "Interface font size",
-            Self::MonoFontSize => "Source font size",
             Self::EditorWidth => "Source column width",
             Self::PreviewPadding => "Preview padding",
         }
@@ -119,9 +293,6 @@ impl Field {
     /// What the file will accept for this setting.
     fn range(self) -> (f32, f32) {
         match self {
-            // One range for both sizes: they are the same kind of number, and
-            // a second constant would only invite them to drift apart.
-            Self::FontSize | Self::MonoFontSize => FONT_SIZE_RANGE,
             Self::EditorWidth => EDITOR_WIDTH_RANGE,
             Self::PreviewPadding => PREVIEW_PADDING_RANGE,
         }
@@ -130,8 +301,6 @@ impl Field {
     /// What the setting holds, or `None` when it is left to a default.
     fn read(self, settings: &Settings) -> Option<f32> {
         match self {
-            Self::FontSize => settings.font_size,
-            Self::MonoFontSize => settings.mono_font_size,
             Self::EditorWidth => settings.editor_max_width,
             Self::PreviewPadding => settings.preview_padding,
         }
@@ -139,8 +308,6 @@ impl Field {
 
     fn write(self, settings: &mut Settings, value: Option<f32>) {
         match self {
-            Self::FontSize => settings.font_size = value,
-            Self::MonoFontSize => settings.mono_font_size = value,
             Self::EditorWidth => settings.editor_max_width = value,
             Self::PreviewPadding => settings.preview_padding = value,
         }
@@ -149,7 +316,6 @@ impl Field {
     /// What the field shows in place of a value.
     fn placeholder(self) -> &'static str {
         match self {
-            Self::FontSize | Self::MonoFontSize => "Theme default",
             Self::EditorWidth => "Fill the pane",
             Self::PreviewPadding => "App default",
         }
@@ -166,7 +332,6 @@ impl Field {
 
     fn blank_meaning(self) -> &'static str {
         match self {
-            Self::FontSize | Self::MonoFontSize => "Blank uses the theme's size",
             Self::EditorWidth => "Blank fills the pane",
             Self::PreviewPadding => "Blank uses the app's margin",
         }
@@ -217,27 +382,15 @@ fn starting_text(field: Field, settings: &Settings) -> String {
     }
 }
 
-/// Which of the two family fields an edit came from.
-#[derive(Clone, Copy)]
-enum Family {
-    Interface,
-    Mono,
-}
-
 impl SettingsForm {
     fn new(settings: Settings, window: &mut Window, cx: &mut App) -> Entity<Self> {
-        let family = text_field(
-            settings.font_family.as_deref().unwrap_or_default(),
-            "System interface font",
-            window,
-            cx,
-        );
-        let mono_family = text_field(
-            settings.mono_font_family.as_deref().unwrap_or_default(),
-            "System monospaced font",
-            window,
-            cx,
-        );
+        // Asked for once, here, rather than in `render`: the builder runs every
+        // frame, and putting several hundred names to the text system on each
+        // of them to throw them away again is not a thing to do. The dialog is
+        // built afresh each time it is opened, so the list is as current as the
+        // moment it appeared.
+        let fonts = cx.text_system().all_font_names();
+
         let numbers = Field::ALL
             .into_iter()
             .map(|field| NumberField {
@@ -253,18 +406,32 @@ impl SettingsForm {
 
         cx.new(|cx| {
             let mut subscriptions = Vec::new();
-            subscriptions.push(cx.subscribe(
-                &family,
-                |this: &mut Self, _, event: &InputEvent, cx| {
-                    this.family_edited(Family::Interface, event, cx)
-                },
-            ));
-            subscriptions.push(cx.subscribe(
-                &mono_family,
-                |this: &mut Self, _, event: &InputEvent, cx| {
-                    this.family_edited(Family::Mono, event, cx)
-                },
-            ));
+            let mut choices = Vec::new();
+
+            for choice in Choice::ALL {
+                let current = choice.read(&settings);
+                let items = options(choice, &fonts, current.as_deref());
+                // Opens on what the setting holds, which is either what the
+                // file said or what was last chosen here.
+                let selected = current
+                    .and_then(|value| items.iter().position(|item| *item == value))
+                    .map(IndexPath::new);
+                let select = cx.new(|cx| {
+                    SelectState::new(SearchableVec::new(items), selected, window, cx)
+                        // Off by default, and the font list is unusable
+                        // without it: hundreds of families and no way to
+                        // narrow them but the scroll wheel.
+                        .searchable(true)
+                });
+                subscriptions.push(cx.subscribe(
+                    &select,
+                    move |this: &mut Self, _, event: &SelectEvent<SearchableVec<String>>, cx| {
+                        this.chose(choice, event, cx)
+                    },
+                ));
+                choices.push(ChoiceField { choice, select });
+            }
+
             for entry in &numbers {
                 let field = entry.field;
                 subscriptions.push(cx.subscribe(
@@ -277,8 +444,7 @@ impl SettingsForm {
 
             Self {
                 settings,
-                family,
-                mono_family,
+                choices,
                 numbers,
                 refused: None,
                 save_error: None,
@@ -328,28 +494,29 @@ impl SettingsForm {
         self.finish(cx);
     }
 
-    fn family_edited(&mut self, which: Family, event: &InputEvent, cx: &mut Context<Self>) {
-        if !matches!(event, InputEvent::Change) {
+    /// A dropdown was used.
+    ///
+    /// Two things arrive here and mean different things: a value, and the clear
+    /// button, which confirms `None` and asks for the theme's own choice back —
+    /// the same thing an absent key in the file means. Closing the menu without
+    /// choosing anything is `DismissEvent`, which is deliberately not
+    /// subscribed to, so walking away from an open menu is not read as having
+    /// cleared it.
+    fn chose(
+        &mut self,
+        choice: Choice,
+        event: &SelectEvent<SearchableVec<String>>,
+        cx: &mut Context<Self>,
+    ) {
+        let SelectEvent::Confirm(value) = event;
+        let before = choice.read(&self.settings);
+        choice.write(&mut self.settings, value.as_deref());
+        // Picking what is already picked confirms it again. Nothing has moved,
+        // and reloading the theme and rewriting the file to arrive back where
+        // we started is work nobody asked for.
+        if choice.read(&self.settings) == before {
             return;
         }
-        let entity = match which {
-            Family::Interface => &self.family,
-            Family::Mono => &self.mono_family,
-        };
-        let text = entity.read(cx).value().to_string();
-        // Blank means the same as a missing key in the file: let the theme pick
-        // the platform's own font. Trimming because a family that differs from
-        // the theme's only by trailing spaces is a typo, not a choice.
-        let value = Some(text.trim().to_owned()).filter(|family| !family.is_empty());
-
-        let slot = match which {
-            Family::Interface => &mut self.settings.font_family,
-            Family::Mono => &mut self.settings.mono_font_family,
-        };
-        if *slot == value {
-            return;
-        }
-        *slot = value;
         self.commit_fonts(cx);
     }
 
@@ -459,19 +626,10 @@ impl Render for SettingsForm {
         let mut body = v_flex().gap_4();
 
         body = body.child(setting("Theme", self.theme_control(cx)));
-        body = body.child(setting(
-            "Interface font",
-            text_control(&self.family, "Blank uses the platform's own font", None, cx),
-        ));
-        body = body.child(setting(
-            "Source font",
-            text_control(
-                &self.mono_family,
-                "Blank uses the platform's monospaced font",
-                None,
-                cx,
-            ),
-        ));
+
+        for entry in &self.choices {
+            body = body.child(setting(entry.choice.name(), entry.control(cx)));
+        }
 
         for entry in &self.numbers {
             let field = entry.field;
@@ -523,7 +681,21 @@ fn text_control(
     complaint: Option<&str>,
     cx: &App,
 ) -> impl IntoElement {
-    let note = match complaint {
+    v_flex()
+        .gap_1()
+        // Cleanable so a field can be emptied back to its default without the
+        // user having to select the text and delete it.
+        .child(Input::new(input).cleanable(true))
+        .child(note(hint, complaint, cx))
+}
+
+/// The line under a control: what blank means, or the complaint that has taken
+/// its place.
+///
+/// The complaint replaces the hint rather than joining it, because the range is
+/// already in the sentence that says the value is outside it.
+fn note(hint: &str, complaint: Option<&str>, cx: &App) -> impl IntoElement {
+    match complaint {
         Some(message) => div()
             .text_sm()
             .text_color(cx.theme().danger)
@@ -532,14 +704,7 @@ fn text_control(
             .text_sm()
             .text_color(cx.theme().muted_foreground)
             .child(hint.to_string()),
-    };
-
-    v_flex()
-        .gap_1()
-        // Cleanable so a field can be emptied back to its default without the
-        // user having to select the text and delete it.
-        .child(Input::new(input).cleanable(true))
-        .child(note)
+    }
 }
 
 /// A one-line text field.
@@ -562,7 +727,8 @@ fn text_field(
 mod tests {
     // Imported narrowly: `use super::*` would drag in the `gpui_kit::*` glob,
     // whose `test` attribute macro shadows the built-in `#[test]`.
-    use super::{Field, Number, read_number};
+    use super::{Choice, Field, Number, options, read_number};
+    use md_core::settings::{FONT_SIZE_RANGE, Settings};
 
     fn value(number: Number) -> Option<Option<f32>> {
         match number {
@@ -571,18 +737,27 @@ mod tests {
         }
     }
 
+    /// A font list shaped like the text system's: sorted, and standing in for
+    /// the several hundred names a real one holds.
+    fn fonts() -> Vec<String> {
+        ["Arial", "Menlo", "Zed Mono"].map(str::to_owned).to_vec()
+    }
+
     #[test]
     fn a_blank_field_asks_for_the_default() {
-        assert_eq!(value(read_number("", Field::FontSize)), Some(None));
+        assert_eq!(value(read_number("", Field::EditorWidth)), Some(None));
         assert_eq!(value(read_number("   ", Field::PreviewPadding)), Some(None));
     }
 
     #[test]
     fn a_value_inside_the_range_is_taken_as_written() {
-        assert_eq!(value(read_number("17", Field::FontSize)), Some(Some(17.0)));
         assert_eq!(
-            value(read_number(" 17.5 ", Field::FontSize)),
-            Some(Some(17.5))
+            value(read_number("600", Field::EditorWidth)),
+            Some(Some(600.0))
+        );
+        assert_eq!(
+            value(read_number(" 600.5 ", Field::EditorWidth)),
+            Some(Some(600.5))
         );
         assert_eq!(
             value(read_number("0", Field::PreviewPadding)),
@@ -592,34 +767,112 @@ mod tests {
 
     #[test]
     fn the_ends_of_the_range_are_inside_it() {
-        assert_eq!(value(read_number("8", Field::FontSize)), Some(Some(8.0)));
-        assert_eq!(value(read_number("48", Field::FontSize)), Some(Some(48.0)));
+        assert_eq!(
+            value(read_number("320", Field::EditorWidth)),
+            Some(Some(320.0))
+        );
         assert_eq!(
             value(read_number("4000", Field::EditorWidth)),
             Some(Some(4000.0))
+        );
+        assert_eq!(
+            value(read_number("200", Field::PreviewPadding)),
+            Some(Some(200.0))
         );
     }
 
     #[test]
     fn a_value_outside_the_range_is_refused_with_the_range_in_the_message() {
-        let Number::Refused(message) = read_number("400", Field::FontSize) else {
-            panic!("400 is not a usable font size");
+        let Number::Refused(message) = read_number("80", Field::EditorWidth) else {
+            panic!("80 is a column too narrow for the window to hold");
         };
-        assert!(message.contains('8'), "{message}");
-        assert!(message.contains("48"), "{message}");
+        // The numbers rather than a single digit: `contains('0')` would be
+        // answered by almost any sentence at all.
+        assert!(message.contains("320"), "{message}");
+        assert!(message.contains("4000"), "{message}");
     }
 
     #[test]
     fn text_that_is_not_a_number_is_refused() {
         assert!(matches!(
-            read_number("eighteen", Field::FontSize),
+            read_number("wide", Field::EditorWidth),
             Number::Refused(_)
         ));
         // Parsed as a float, but not one anything can be laid out with.
         assert!(matches!(
-            read_number("inf", Field::FontSize),
+            read_number("inf", Field::EditorWidth),
             Number::Refused(_)
         ));
+    }
+
+    #[test]
+    fn the_size_list_is_every_whole_point_the_file_keeps() {
+        let sizes = options(Choice::FontSize, &[], None);
+        let (min, max) = FONT_SIZE_RANGE;
+        assert_eq!(sizes.len(), (max - min) as usize + 1);
+        assert_eq!(sizes.first().map(String::as_str), Some("8"));
+        assert_eq!(sizes.last().map(String::as_str), Some("48"));
+        // Nothing offered is something `Settings` would pull back on load.
+        for size in &sizes {
+            let size: f32 = size.parse().expect("a size is a number");
+            assert!((min..=max).contains(&size), "{size} is outside the range");
+        }
+    }
+
+    #[test]
+    fn a_size_the_list_does_not_hold_is_shown_where_it_belongs() {
+        // What a hand-edited file can hold: in range, so `Settings` keeps it,
+        // and not one of the whole points the list offers.
+        let sizes = options(Choice::FontSize, &[], Some("13.5"));
+        let at = sizes
+            .iter()
+            .position(|size| size == "13.5")
+            .expect("the value the file holds is in the list");
+        assert_eq!(sizes[at - 1], "13");
+        assert_eq!(sizes[at + 1], "14");
+        // Inserted, not appended, and not duplicated.
+        assert_eq!(sizes.len(), 42);
+    }
+
+    #[test]
+    fn a_size_survives_the_round_trip_through_the_dropdown() {
+        let mut settings = Settings::default();
+        Choice::FontSize.write(&mut settings, Some("13.5"));
+        assert_eq!(settings.font_size, Some(13.5));
+        assert_eq!(Choice::FontSize.read(&settings).as_deref(), Some("13.5"));
+
+        // A whole point comes back as one, without a trailing ".0" that would
+        // match no entry in the list.
+        Choice::FontSize.write(&mut settings, Some("18"));
+        assert_eq!(Choice::FontSize.read(&settings).as_deref(), Some("18"));
+    }
+
+    #[test]
+    fn clearing_a_dropdown_asks_for_the_theme_default() {
+        let mut settings = Settings::default();
+        Choice::FontFamily.write(&mut settings, Some("Inter"));
+        assert_eq!(settings.font_family.as_deref(), Some("Inter"));
+
+        // What the clear button confirms.
+        Choice::FontFamily.write(&mut settings, None);
+        assert_eq!(settings.font_family, None);
+        assert_eq!(Choice::FontFamily.read(&settings), None);
+
+        // Whitespace is a cleared field someone typed a space into.
+        Choice::MonoFontFamily.write(&mut settings, Some("   "));
+        assert_eq!(settings.mono_font_family, None);
+    }
+
+    #[test]
+    fn a_font_the_system_no_longer_has_is_still_offered() {
+        let listed = options(Choice::MonoFontFamily, &fonts(), Some("Glyph Sans"));
+        assert_eq!(listed, ["Arial", "Glyph Sans", "Menlo", "Zed Mono"]);
+
+        // A family that is installed is not offered twice, and the list comes
+        // back exactly as the text system gave it.
+        let listed = options(Choice::MonoFontFamily, &fonts(), Some("Menlo"));
+        assert_eq!(listed, fonts());
+        assert_eq!(options(Choice::MonoFontFamily, &fonts(), None), fonts());
     }
 
     #[test]

@@ -25,9 +25,9 @@ publish a version that has no section. See [Releasing](#releasing) at the bottom
   built-in search.
 - **A settings panel.** <kbd>Cmd</kbd>+<kbd>,</kbd>, or the settings button at the right of the
   status bar, edits every setting the file holds — theme, both font families and sizes, the source
-  column's width and the preview's padding. Changes apply as they are made, and text that does not
-  yet mean a usable number is left alone until it does rather than clamped to something you did not
-  ask for.
+  column's width and the preview's padding. Each one applies the moment it is chosen, and the two
+  fields that are still typed refuse text that does not mean a usable number, with the range spelled
+  out, rather than clamping it to something you did not ask for.
 - **A status bar.** Along the bottom of the window: how much the active document holds, and the
   button that opens the settings above.
 
@@ -47,6 +47,13 @@ publish a version that has no section. See [Releasing](#releasing) at the bottom
 
 - **The preview has a margin.** Rendered text used to sit flush against the pane edge, which reads
   as though it has been cropped. The default is 24 points, and it is one of the settings above.
+- **Fonts and sizes are chosen, not typed.** Both font families and both sizes in the settings panel
+  were text fields, which asked you to know a name before you could pick it and said nothing when
+  the name did not exist — the text system falls back to whatever it has, so a typo looked exactly
+  like a font that had not applied. They are dropdowns now, searchable, listing the families the
+  system actually reports and every whole point from 8 to 48. A value the list does not hold, such
+  as a size of `13.5` edited into the file by hand, is listed in its place rather than dropped, so
+  opening the panel cannot change a setting that was already in force.
 
 ## [0.1.0] - 2026-10-05
 

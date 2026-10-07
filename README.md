@@ -156,12 +156,25 @@ window follows the operating system and keeps following it when it changes; a li
 holds until it is changed back. <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> does the same.
 
 <kbd>Cmd</kbd>+<kbd>,</kbd> — or the settings button at the right of the status bar — opens a panel
-over the window holding every setting described below. Each one applies the moment it is usable: a
-font size typed digit by digit takes effect at `1` and then again at `18`, and the panel says
-nothing in between, because `1` is a step on the way to a number rather than a mistake. Text that
-never becomes usable — `abc`, or a size well outside the range — is refused on the way out of the
-field, with the range spelled out, and the setting keeps the value it had. Nothing is silently
-clamped: a number you did not ask for is worse than one you are told about.
+over the window holding every setting described below, and each one applies the moment it is chosen.
+The four font settings are dropdowns. The families are the ones the system actually has, asked of the
+text system as the panel opens; the sizes are every whole point from 8 to 48, the range the file
+below accepts. Both are searchable, because several hundred families is not a list to scroll. Once
+something is chosen an ✕ appears beside it, and clearing it is how you ask for the theme's own font
+or size back — the same thing a missing key in the file means.
+
+The source column's width and the preview's padding stay typed: any value in their ranges is a real
+choice, and no list of them would help. Those two apply the moment their text is usable, so a number
+typed digit by digit takes effect at `1` and then again at `18`, and the panel says nothing in
+between — `1` is a step on the way to a number, not a mistake. Text that never becomes usable, `abc`
+or a width well outside the range, is refused on the way out of the field with the range spelled out,
+and the setting keeps the value it had. Nothing is silently clamped: a number you did not ask for is
+worse than one you are told about.
+
+A dropdown can also be showing you a value it does not normally offer. A file may hold a size of
+`13.5`, or the name of a font that has since been uninstalled, and the app has been honouring it —
+so it is listed, in its place in the order, rather than dropped. Opening the panel never quietly
+changes a setting that was already in force.
 
 Everything else is a small JSON file in the platform's per-user configuration directory, which is
 `~/Library/Application Support/dev.aafnnp.md/settings.json` on macOS. It is read once, at startup:

@@ -65,10 +65,11 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
 
 /// Put the fonts into force, leaving the mode alone.
 ///
-/// Split out of [`apply`] for the settings dialog, where a font size typed one
-/// digit at a time would otherwise reload the whole registered theme on every
-/// keystroke — and be handed no window to do it with, since the dialog's fields
-/// are watched through subscriptions, which carry no window.
+/// Split out of [`apply`] for the settings panel, which changes fonts without
+/// touching the mode. Going through [`apply`] would reload the mode's
+/// registered theme and re-resolve the default families — the very thing the
+/// fonts were chosen to replace. The panel changes them from a subscription,
+/// too, and a subscription carries no window for a mode change to use.
 pub fn apply_fonts(settings: &Settings, cx: &mut App) {
     Theme::update(cx, |theme| {
         if let Some(family) = &settings.font_family {
