@@ -28,7 +28,6 @@
 use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::{Radio, RadioGroup};
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::{ActiveTheme, IndexPath, WindowExt as _, v_flex};
 use gpui_kit::*;
@@ -64,7 +63,13 @@ pub fn open(window: &mut Window, cx: &mut App) {
                     .show_cancel(false)
                     .ok_text("Done"),
             )
-            .content(move |content, _, _| content.child(body_form.clone()))
+            // `.child`, not `.content`. The content area sits beside the
+            // dialog's own scrolling body, not inside it, and it has no
+            // overflow of its own — so it refuses to shrink, and the fields
+            // past the bottom of a short window are clipped with nothing to
+            // scroll them into view. `.child` hands the form to the body that
+            // does scroll.
+            .child(body_form.clone())
             .on_ok(move |_, _, cx| done_form.update(cx, |form, cx| form.done(cx)))
     });
 }
@@ -655,9 +660,11 @@ impl Render for SettingsForm {
             );
         }
 
-        // The dialog is a fixed width and the settings are more than fit a short
-        // window, so the body scrolls rather than clipping the last field.
-        div().max_h(px(460.)).overflow_y_scrollbar().child(body)
+        // The form goes to the dialog's own scrolling body, which takes over
+        // once the dialog has grown to the window and can grow no further — so
+        // no scrolling is set up here. A height or an overflow of our own could
+        // only ever be a second, competing scroll region.
+        body
     }
 }
 
