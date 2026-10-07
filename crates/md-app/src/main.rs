@@ -1,6 +1,7 @@
 //! `md` — a GPUI desktop Markdown editor.
 
 mod actions;
+mod clipboard;
 mod editor;
 mod preview;
 mod settings;
@@ -13,7 +14,8 @@ use gpui_kit::*;
 use md_core::settings::Settings;
 
 use crate::actions::{
-    CloseTab, ExportHtml, OpenFile, OpenSettings, Quit, Save, SaveAs, SelectTab, ToggleTheme,
+    CloseTab, CopyLayout, ExportHtml, OpenFile, OpenSettings, Quit, Save, SaveAs, SelectTab,
+    ToggleTheme,
 };
 use crate::settings::AppSettings;
 use crate::workspace::Workspace;
@@ -55,6 +57,9 @@ fn main() {
                 KeyBinding::new("cmd-s", Save, None),
                 KeyBinding::new("cmd-shift-s", SaveAs, None),
                 KeyBinding::new("cmd-shift-e", ExportHtml, None),
+                // The export's sibling: the same document, to the clipboard
+                // instead of to a file.
+                KeyBinding::new("cmd-shift-c", CopyLayout, None),
                 // The same key every macOS app puts its preferences on.
                 KeyBinding::new("cmd-,", OpenSettings, None),
             ]);

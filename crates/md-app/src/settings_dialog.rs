@@ -31,6 +31,7 @@ use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::{ActiveTheme, IndexPath, WindowExt as _, v_flex};
 use gpui_kit::*;
+use md_core::Platform;
 use md_core::settings::{
     EDITOR_WIDTH_RANGE, FONT_SIZE_RANGE, PREVIEW_PADDING_RANGE, Settings, ThemePreference,
 };
@@ -624,6 +625,47 @@ impl SettingsForm {
                 cx.listener(|this, index: &usize, window, cx| this.set_theme(*index, window, cx)),
             )
     }
+
+    /// Which layout the export and the copy are dressed for.
+    ///
+    /// Here as well as in the status bar because the bar is a shortcut for the
+    /// common case, not the whole of the setting: a panel that edits every
+    /// setting the file holds has to hold this one too. The group wraps rather
+    /// than scrolling — five labels with two scripts in them do not fit one row
+    /// of a dialog this wide.
+    fn typesetting_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let chosen = self.settings.typesetting;
+        RadioGroup::horizontal("settings-typesetting")
+            .selected_index(Platform::ALL.iter().position(|one| *one == chosen))
+            .children(
+                Platform::ALL
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, platform)| {
+                        Radio::new(("settings-typesetting", index))
+                            .label(platform.label())
+                            .checked(platform == chosen)
+                    }),
+            )
+            .on_change(cx.listener(|this, index: &usize, _, cx| this.set_typesetting(*index, cx)))
+    }
+
+    fn set_typesetting(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(platform) = Platform::ALL.get(index).copied() else {
+            return;
+        };
+        if self.settings.typesetting == platform {
+            return;
+        }
+        self.settings.typesetting = platform;
+
+        AppSettings::set(self.settings.clone(), cx);
+        // No `settings::apply` and no window: unlike the theme, nothing about
+        // this setting reaches the frame being drawn. It is read when a
+        // document is exported or copied, so writing it down and asking for a
+        // redraw is the whole of the work.
+        self.finish(cx);
+    }
 }
 
 impl Render for SettingsForm {
@@ -631,6 +673,7 @@ impl Render for SettingsForm {
         let mut body = v_flex().gap_4();
 
         body = body.child(setting("Theme", self.theme_control(cx)));
+        body = body.child(setting("Typesetting", self.typesetting_control(cx)));
 
         for entry in &self.choices {
             body = body.child(setting(entry.choice.name(), entry.control(cx)));

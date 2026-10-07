@@ -74,7 +74,7 @@ pub fn suggested_file_name(document_name: &str) -> String {
 /// Escape the five characters that would otherwise be markup.
 ///
 /// The title comes from a file name, so it is the user's text, not ours.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
         match character {

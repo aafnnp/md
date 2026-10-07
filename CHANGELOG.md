@@ -23,9 +23,25 @@ publish a version that has no section. See [Releasing](#releasing) at the bottom
 - **Find and replace.** <kbd>Cmd</kbd>+<kbd>F</kbd> and
   <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> over the source pane, from the editor component's
   built-in search.
+- **Layouts for self-media.** A document can be laid out for **微信公众号**, **今日头条**,
+  **小红书** or **知乎**, and then exported as a page or copied to the clipboard as rich text ready
+  to paste into that platform's editor. The four are not themes: each is the same document rendered
+  the way its destination will actually accept it — everything inline, in pixels and hex, with no
+  stylesheet, no classes and no elements the platform's own editor would drop on the way in. The
+  layout is chosen from the status bar, remembered in the settings file, and it applies to the export
+  and the copy alone; the preview beside the source is the same renderer it always was. With no layout
+  chosen, nothing about either is different from before. **Relative images are inlined as base64 data
+  URIs** so a paste carries its own pictures, and any that could not be read are named rather than
+  silently left behind.
+- **Copy the document as rich text.** <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>, or the **Copy**
+  button in the status bar, puts the laid-out document on the system clipboard as HTML, with its plain
+  text alongside it for anywhere that cannot take the rich form. This is the path a self-media editor
+  wants: pasting the Markdown would arrive as literal punctuation, and pasting the exported page would
+  arrive as one long paragraph, because its styling lives in a `<head>` those editors discard.
 - **A settings panel.** <kbd>Cmd</kbd>+<kbd>,</kbd>, or the settings button at the right of the
-  status bar, edits every setting the file holds — theme, both font families and sizes, the source
-  column's width and the preview's padding. Each one applies the moment it is chosen, and the two
+  status bar, edits every setting the file holds — theme, the layout above, both font families and
+  sizes, the source column's width and the preview's padding. Each one applies the moment it is
+  chosen, and the two
   fields that are still typed refuse text that does not mean a usable number, with the range spelled
   out, rather than clamping it to something you did not ask for.
 - **A status bar.** Along the bottom of the window: how much the active document holds, and the

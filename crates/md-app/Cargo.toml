@@ -16,6 +16,15 @@ path = "src/main.rs"
 gpui-kit = "0.7.1"
 md-core = { workspace = true }
 
+# The system clipboard's `text/html` flavour. GPUI's own clipboard carries plain
+# text only — the platform-specific rich-text types are behind private modules in
+# the facade — so copying a laid-out document has to be done directly.
+#
+# `default-features = false` drops `image-data`. What is written here is text, so
+# the whole image-decode dependency tree that feature pulls in would be dead
+# weight in every release build.
+arboard = { version = "3", default-features = false }
+
 # `test-support` turns on GPUI's headless renderer so the workspace tests can
 # drive a real window. Under resolver v3 this feature stays out of normal
 # `cargo build` output.

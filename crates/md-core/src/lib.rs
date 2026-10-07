@@ -11,9 +11,11 @@ pub mod fs;
 pub mod image;
 pub mod recent;
 pub mod settings;
+pub mod typeset;
 
 pub use count::{Counts, counts};
 pub use document::Document;
 pub use export::to_html_page;
 pub use recent::RecentFiles;
 pub use settings::{Settings, ThemePreference};
+pub use typeset::Platform;

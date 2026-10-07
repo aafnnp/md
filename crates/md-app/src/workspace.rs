@@ -8,10 +8,15 @@ use gpui_kit::base::{h_resizable, resizable_panel};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::input::{Input, InputState};
+// Brought in as traits rather than by name: what is wanted from them is the
+// method, and neither name is spelled out anywhere below.
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab as TabButton, TabBar};
-use gpui_kit::component::{ActiveTheme, IconName, Sizable as _, WindowExt as _, v_flex};
+use gpui_kit::component::{
+    ActiveTheme, Disableable as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 // `when` and its neighbours come from GPUI's prelude rather than its root, and
 // the glob above only reaches the root.
 use gpui_kit::prelude::FluentBuilder as _;
@@ -19,12 +24,14 @@ use gpui_kit::*;
 
 use md_core::fs;
 use md_core::recent::{self, RecentFiles};
+use md_core::typeset::{self, Platform};
 use md_core::{Counts, Document, counts, export};
 
 use crate::actions::{
-    CloseTab, CloseTabAt, ExportHtml, OpenFile, OpenSettings, Quit, Save, SaveAs, SelectTab,
-    ToggleTheme,
+    CloseTab, CloseTabAt, CopyLayout, ExportHtml, OpenFile, OpenSettings, Quit, Save, SaveAs,
+    SelectTab, SetTypesetting, ToggleTheme,
 };
+use crate::clipboard;
 use crate::settings::{self, AppSettings};
 use crate::settings_dialog;
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarRequest};
@@ -635,7 +642,8 @@ impl Workspace {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
-    /// `Cmd+Shift+E`: write the active tab out as a standalone HTML page.
+    /// `Cmd+Shift+E`: write the active tab out as a standalone HTML page, in
+    /// whichever layout is in force.
     ///
     /// This uses the platform's own save panel rather than the in-app name
     /// prompt that Save As uses. The two are asking different questions: saving
@@ -661,17 +669,25 @@ impl Workspace {
                 return;
             };
 
+            // The layout is read here rather than captured before the prompt:
+            // the panel can be left open for as long as the user likes, and the
+            // menu behind it is still live.
             let written = this.update(cx, |_, cx| {
+                let platform = AppSettings::current(cx).typesetting;
                 let markdown = tab.read(cx).markdown(cx);
                 let title = tab.read(cx).title();
-                export::export_html(&path, &title, &markdown)
+                let base = tab.read(cx).base_dir();
+                (
+                    platform,
+                    typeset::export(&path, platform, &title, &markdown, base.as_deref()),
+                )
             });
 
             let note = match written {
                 // The workspace is gone, so there is nowhere to show anything.
                 Err(_) => return,
-                Ok(Ok(())) => Notification::info(format!("Exported to {}", file_label(&path))),
-                Ok(Err(error)) => Notification::error(format!(
+                Ok((platform, Ok(()))) => Notification::info(exported_note(platform, &path)),
+                Ok((_, Err(error))) => Notification::error(format!(
                     "Could not export to “{}”: {error}",
                     file_label(&path)
                 )),
@@ -1013,6 +1029,102 @@ impl Workspace {
         }
     }
 
+    /// Pick the layout the export and the copy are dressed for.
+    ///
+    /// Written down the way the theme is, and reported the same way when the
+    /// write fails: the choice is in force for this run either way, and saying
+    /// so is more use than letting the click look as if it did nothing.
+    ///
+    /// No theme machinery runs here — nothing about this setting reaches the
+    /// window. It is read when a document is exported or copied, and the only
+    /// thing on screen that shows it is the status bar's own label, which the
+    /// notify below redraws.
+    fn set_typesetting(
+        &mut self,
+        action: &SetTypesetting,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = AppSettings::current(cx);
+        if settings.typesetting == action.0 {
+            return;
+        }
+        settings.typesetting = action.0;
+        AppSettings::set(settings.clone(), cx);
+
+        if let Err(error) = settings.save() {
+            window.push_notification(
+                Notification::warning(format!(
+                    "The layout is {} for now, but saving the setting failed: {error}",
+                    action.0.label()
+                )),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// `Cmd+Shift+C`: put the active tab on the clipboard, laid out for the
+    /// chosen platform.
+    ///
+    /// Synchronous, unlike the export, and not for want of work to do: reading
+    /// a document's images off disk and encoding them to base64 is milliseconds
+    /// at the very worst, and there is no panel to wait on, so an async round
+    /// trip would buy nothing and would put the error somewhere further from
+    /// the report.
+    fn copy_layout(&mut self, _: &CopyLayout, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active).cloned() else {
+            return;
+        };
+
+        let platform = AppSettings::current(cx).typesetting;
+        if platform == Platform::Plain {
+            // Refused rather than copied as plain text: this button exists to
+            // carry a layout, and a plain copy is something the editor already
+            // does without leaving the keyboard. Silently downgrading would
+            // make the feature look like it worked.
+            window.push_notification(
+                Notification::warning(
+                    "Choose a layout first — the copy is dressed for the platform you pick."
+                        .to_string(),
+                ),
+                cx,
+            );
+            return;
+        }
+
+        let markdown = tab.read(cx).markdown(cx);
+        let base = tab.read(cx).base_dir();
+        let layout = typeset::fragment(platform, &markdown, base.as_deref());
+
+        match clipboard::copy(&layout) {
+            Ok(()) => {
+                window.push_notification(
+                    Notification::info(format!("Copied the {} layout", platform.label())),
+                    cx,
+                );
+                // Said afterwards rather than instead: the copy did work, and
+                // what the writer needs to know is that a picture in the
+                // document will not have come with it.
+                if !layout.unresolved_images.is_empty() {
+                    window.push_notification(
+                        Notification::warning(format!(
+                            "{} could not be read, so the copy still points at the files on \
+                             disk: {}",
+                            counted(layout.unresolved_images.len(), "image"),
+                            layout.unresolved_images.join(", ")
+                        )),
+                        cx,
+                    );
+                }
+            }
+            Err(error) => window.push_notification(
+                Notification::error(format!("Could not copy the layout: {error}")),
+                cx,
+            ),
+        }
+    }
+
     fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(tab) = self.tabs.get(self.active) else {
             return div()
@@ -1031,8 +1143,8 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The bar along the bottom: how much is in the document, and the way in to
-    /// the settings.
+    /// The bar along the bottom: how much is in the document, where it is being
+    /// published, and the way in to the settings.
     ///
     /// The size is read from `self.counts` rather than from the active tab
     /// because `self.counts` is the copy something keeps up to date; the tab's
@@ -1042,23 +1154,98 @@ impl Workspace {
     /// With no tabs open the left side is left empty rather than reading
     /// "0 characters": a document that does not exist has no size, and a zero
     /// would suggest one that is merely empty.
-    fn render_status_bar(&self) -> impl IntoElement {
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let platform = AppSettings::current(cx).typesetting;
+
         StatusBar::new()
             .left(div().when(!self.tabs.is_empty(), |this| {
                 this.child(counts_label(self.counts))
             }))
-            // Dispatches rather than opening the dialog directly, so the click
-            // and the key binding take the same path — and so this method does
-            // not have to be the one holding the window.
+            // Every control here dispatches rather than calling in, so the
+            // click and the key binding take the same path — and so this method
+            // does not have to be the one holding the window.
             .right(
-                Button::new("settings")
-                    .ghost()
-                    .compact()
-                    .icon(IconName::Settings)
-                    .label("Settings")
-                    .tooltip("Settings")
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        Button::new("copy-layout")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Copy)
+                            .label("Copy")
+                            .tooltip("Copy the document, laid out for the platform")
+                            // Nothing to dress under "No layout": the copy
+                            // would be the plain text the editor's own copy
+                            // already produces, so offering it would be
+                            // offering a second way to do the same nothing.
+                            .disabled(platform == Platform::Plain)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(CopyLayout), cx)
+                            }),
+                    )
+                    .child(self.typesetting_menu(platform))
+                    .child(
+                        Button::new("settings")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Settings)
+                            .label("Settings")
+                            .tooltip("Settings")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(OpenSettings), cx)
+                            }),
+                    ),
             )
+    }
+
+    /// The platform picker: every layout the app can dress, on a dropdown.
+    ///
+    /// A dropdown rather than a row of buttons because the status bar has one
+    /// row and the document is the thing being read. The check mark is what
+    /// makes it a picker rather than a fan of buttons — the layout in force is
+    /// otherwise only visible in the label of the trigger itself.
+    fn typesetting_menu(&self, current: Platform) -> impl IntoElement {
+        Button::new("typesetting")
+            .ghost()
+            .compact()
+            .label(current.label())
+            .tooltip("Which platform's layout the export and the copy are dressed for")
+            // Anchored to the button's bottom-left so the menu opens upwards.
+            // The default is the top-left, which would put a five-item list
+            // off the bottom of the window: this trigger sits in the status
+            // bar.
+            .dropdown_menu_with_anchor(gpui_kit::Anchor::BottomLeft, move |menu, _, _| {
+                Platform::ALL
+                    .into_iter()
+                    .fold(menu.min_w(px(180.)), |menu, platform| {
+                        menu.item(
+                            PopupMenuItem::new(platform.label())
+                                .checked(platform == current)
+                                .on_click(move |_, window, cx| {
+                                    window.dispatch_action(Box::new(SetTypesetting(platform)), cx)
+                                }),
+                        )
+                    })
+            })
+    }
+}
+
+/// What the export notification says.
+///
+/// The layout is named because it is invisible in the file that comes out: two
+/// exports of the same document under two layouts produce two different pages,
+/// and the only other place the choice shows is the status bar. Under
+/// `Plain` it is left out, which keeps the wording this app has always used for
+/// the export that has always existed.
+fn exported_note(platform: Platform, path: &Path) -> String {
+    match platform {
+        Platform::Plain => format!("Exported to {}", file_label(path)),
+        chosen => format!(
+            "Exported the {} layout to {}",
+            chosen.label(),
+            file_label(path)
+        ),
     }
 }
 
@@ -1333,10 +1520,12 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &ExportHtml, window, cx| this.export_active(window, cx)),
             )
+            .on_action(cx.listener(Self::copy_layout))
+            .on_action(cx.listener(Self::set_typesetting))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.open_file(window, cx)))
             .child(self.render_tab_strip(cx))
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
-            .child(self.render_status_bar())
+            .child(self.render_status_bar(cx))
     }
 }
 
@@ -1344,8 +1533,11 @@ impl Render for Workspace {
 mod tests {
     // Imported narrowly: `use super::*` would drag in the `gpui_kit::*` glob,
     // whose `test` attribute macro shadows the built-in `#[test]`.
-    use super::{NameOutcome, NameTarget, STARTER_DOCUMENT, Workspace, counted, counts_label};
+    use super::{
+        NameOutcome, NameTarget, STARTER_DOCUMENT, Workspace, counted, counts_label, exported_note,
+    };
     use crate::actions::{CloseTab, CloseTabAt, ExportHtml, OpenFile, OpenSettings, SelectTab};
+    use crate::settings::AppSettings;
     use crate::sidebar::SidebarRequest;
     use gpui_kit::base::Root;
     use gpui_kit::component::WindowExt as _;
@@ -1356,6 +1548,7 @@ mod tests {
     };
     use md_core::Counts;
     use md_core::Document;
+    use md_core::Platform;
     use md_core::RecentFiles;
     use md_core::fs::NameError;
     use std::path::{Path, PathBuf};
@@ -2366,6 +2559,50 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The layout in force is the one the export writes.
+    ///
+    /// This drives the same round trip as the test above rather than calling
+    /// `typeset::export` — `md-core` covers that — because what is being
+    /// checked here is the wire between the two: the setting the status bar
+    /// writes is read back *inside* the spawned task, after the save panel has
+    /// been answered, and a layout that never reached that read would leave the
+    /// app exporting plain pages while its menu said 公众号.
+    #[gpui_kit::test]
+    fn exporting_in_a_layout_mode_writes_the_styled_page(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("export-layout");
+        let source = dir.join("note.md");
+        std::fs::write(&source, "# Heading\n\nA paragraph.\n").unwrap();
+
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(source, cx));
+
+        // Set directly rather than by dispatching `SetTypesetting`: that
+        // handler writes the settings file down, and a test has no business
+        // editing whatever preferences the machine running it has saved.
+        let mut settings = cx.update(|cx| AppSettings::current(cx));
+        settings.typesetting = Platform::WeChat;
+        cx.update(|cx| AppSettings::set(settings, cx));
+
+        dispatch::<ExportHtml>(window, ExportHtml, cx);
+        let exported = dir.join("note.html");
+        cx.simulate_new_path_selection(|_| Some(exported.clone()));
+        cx.run_until_parked();
+
+        let page = std::fs::read_to_string(&exported).unwrap();
+        // 公众号 drops `<h1>`, so the recipe turns every heading into a styled
+        // section — the text survives, the tag does not.
+        assert!(!page.contains("<h1>"), "{page}");
+        assert!(page.contains("<section style="), "{page}");
+        assert!(page.contains("Heading"), "{page}");
+        // Still a whole page rather than a fragment: what changed is the
+        // dressing, not what kind of file an export is.
+        assert!(page.starts_with("<!DOCTYPE html>"), "{page}");
+        assert!(page.contains("<title>note.md</title>"), "{page}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The save panel opens in the document's own folder: the common case is
     /// an export landing beside the file it came from, so that is where the
     /// dialog should already be looking.
@@ -2501,6 +2738,22 @@ mod tests {
             "1 character · 1 line"
         );
         assert_eq!(counts_label(Counts::default()), "0 characters · 0 lines");
+    }
+
+    /// Under the default layout the export says exactly what it always said;
+    /// under the others it names the layout, because the choice is not in the
+    /// file and the next export may be dressed differently.
+    #[test]
+    fn the_export_notice_names_the_layout_only_when_there_is_one() {
+        let path = Path::new("/tmp/note.html");
+        assert_eq!(
+            exported_note(Platform::Plain, path),
+            "Exported to note.html"
+        );
+        assert_eq!(
+            exported_note(Platform::WeChat, path),
+            "Exported the 公众号 layout to note.html"
+        );
     }
 
     /// The status bar's button dispatches the same action `Cmd+,` is bound to,

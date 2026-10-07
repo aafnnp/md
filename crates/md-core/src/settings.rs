@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::typeset::Platform;
+
 /// The file name inside the platform's configuration directory.
 pub const FILE_NAME: &str = "settings.json";
 
@@ -82,6 +84,12 @@ impl ThemePreference {
 pub struct Settings {
     /// Light, dark, or whatever the system says.
     pub theme: ThemePreference,
+    /// Which platform's typesetting an export or a copy is dressed for.
+    ///
+    /// App-wide rather than per document: it is a property of where the writer
+    /// is publishing, and that does not change from one tab to the next. A
+    /// field missing from the file becomes the default, `Plain`.
+    pub typesetting: Platform,
     /// Family for everything but the source pane. `None` keeps the one the
     /// theme resolved, which is the platform's own interface font.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -232,6 +240,7 @@ mod tests {
     fn the_defaults_follow_the_system_and_leave_the_rest_to_the_theme() {
         let settings = Settings::default();
         assert_eq!(settings.theme, ThemePreference::System);
+        assert_eq!(settings.typesetting, Platform::Plain);
         assert_eq!(settings.font_family, None);
         assert_eq!(settings.font_size, None);
         assert_eq!(settings.mono_font_family, None);
@@ -260,6 +269,7 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let settings = Settings {
             theme: ThemePreference::Dark,
+            typesetting: Platform::WeChat,
             font_family: Some("Iosevka".to_string()),
             font_size: Some(17.0),
             mono_font_family: Some("JetBrains Mono".to_string()),
@@ -301,6 +311,7 @@ mod tests {
 
         let settings = Settings::load_from(&path);
         assert_eq!(settings.theme, ThemePreference::Dark);
+        assert_eq!(settings.typesetting, Platform::Plain);
         assert_eq!(settings.font_size, None);
         assert_eq!(settings.editor_max_width, None);
         assert_eq!(settings.preview_padding, None);
@@ -317,6 +328,38 @@ mod tests {
         std::fs::write(&path, r#"{"theme": "light", "future_thing": 3}"#).unwrap();
 
         assert_eq!(Settings::load_from(&path).theme, ThemePreference::Light);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The slugs are the on-disk spelling, so they are an interface: a file
+    /// written by this build has to load in the next one.
+    ///
+    /// `WeChat` is the one that does not fall out of the enum's name — the
+    /// snake-case conversion sees two words and writes `we_chat`. Pinning it
+    /// here is what keeps a later tidy-up from quietly renaming it.
+    #[test]
+    fn every_platform_has_a_stable_slug_in_the_file() {
+        let dir = scratch("slugs");
+        let path = dir.join(FILE_NAME);
+
+        for (platform, slug) in [
+            (Platform::Plain, "plain"),
+            (Platform::WeChat, "wechat"),
+            (Platform::Toutiao, "toutiao"),
+            (Platform::Xiaohongshu, "xiaohongshu"),
+            (Platform::Zhihu, "zhihu"),
+        ] {
+            let settings = Settings {
+                typesetting: platform,
+                ..Default::default()
+            };
+            settings.save_to(&path).unwrap();
+
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(text.contains(&format!("\"{slug}\"")), "{text}");
+            assert_eq!(Settings::load_from(&path).typesetting, platform);
+        }
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

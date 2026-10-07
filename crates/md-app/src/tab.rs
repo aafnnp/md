@@ -111,6 +111,16 @@ impl Tab {
         self.markdown(cx)
     }
 
+    /// The folder this document's relative image URLs resolve against.
+    ///
+    /// `None` for a buffer that has never been saved: without a file there is no
+    /// folder for a relative path to be relative to, which is what tells an
+    /// export to leave `![](diagram.png)` alone rather than look for it beside
+    /// the working directory.
+    pub fn base_dir(&self) -> Option<PathBuf> {
+        self.document.base_dir()
+    }
+
     /// A handle on the source pane, so the caret can be put in it.
     ///
     /// Creating the tab already focuses its editor. The workspace asks for this

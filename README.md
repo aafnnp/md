@@ -8,8 +8,9 @@ Two panes: write Markdown on the left, see it rendered on the right, live as you
 > **Status: early.** M0–M5 are done, apart from clickable task-list checkboxes and synchronised
 > scrolling (see [Known gaps](#known-gaps)). The editor opens, edits, finds, renders, saves and
 > exports Markdown in two panes, keeps tabs and a file tree alongside a list of recently opened
-> files, resolves images relative to the document, and remembers its theme. Tagged pushes are
-> packaged for macOS, Windows and Linux — see [Releases](#releases).
+> files, resolves images relative to the document, lays a document out for 公众号 / 头条 / 小红书 /
+> 知乎 to be exported or copied as rich text, and remembers its theme. Tagged pushes are packaged for
+> macOS, Windows and Linux — see [Releases](#releases).
 
 ## Stack
 
@@ -115,6 +116,46 @@ that file's folder, while an export is a *new* file that usually belongs somewhe
 suggested name is the document's own with an `.html` extension — `notes.md` exports to `notes.html`,
 and an untitled buffer to `untitled.html`.
 
+## Layouts for self-media
+
+A document can be laid out for **微信公众号**, **今日头条**, **小红书** or **知乎**, chosen from
+the dropdown at the right of the status bar. Nothing about the source changes: what the choice
+decides is how the document comes out when it is exported (<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd>)
+or copied (<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>).
+
+The four are not themes. Each is the same document rendered the way its destination will actually
+accept it, which is a narrower thing than it sounds. Those editors are one-way cleaners: a `<style>`
+block is dropped, `class` and `id` are dropped, a `<div>` may come back as a `<p>`, headings may be
+demoted, links to other sites are filtered out. What survives is **inline `style` attributes, `px`
+units and hex colours** — so that is the whole of what a layout emits. Headings become styled
+`sections` rather than `<h1>` where the platform would not keep one, the task-list checkboxes the
+compiler writes as `<input>` become `☑` and `☐`, and no stylesheet is written at all.
+
+| | 公众号 | 今日头条 | 小红书 | 知乎 |
+|---|---|---|---|---|
+| Text | 16px / 1.75 / `#3f3f3f` | 17px / 1.8 / `#333333` | 16px / 1.8 / `#333333` | 16px / 1.7 / `#1a1a1a` |
+| Headings | `section` with a green left bar | kept, red rule under the top two | all `h2`, bold and larger | kept, grey rule under each |
+| Quotes | grey fill, left bar | grey fill, left bar | grey fill, left bar | left bar, no fill |
+
+小红书's styling is deliberately thin, because that editor normalises whatever it is given into its
+own. A layout's value there is that the **structure** arrives — that a heading is still a heading and
+a quote is still a quote — rather than that it looks like anything in particular.
+
+**Images are inlined.** A relative image is read from disk and written into the page or the clipboard
+as a base64 `data:` URI, so a paste carries its own pictures instead of pointing at files the
+destination cannot see. A URL that already means something — `https:`, `data:`, an absolute path — is
+passed through untouched. An image that could not be read stays as it was written and is named in a
+notification, because a picture that quietly does not arrive is worse than being told which one.
+
+Choosing **No layout** is the default, and it is not a fifth style: the export is byte-for-byte the
+page it has always been, and the **Copy** button is greyed out, since there would be nothing to copy
+that the Markdown itself is not.
+
+The preview beside the source is deliberately untouched by any of this. Restoring a platform's
+typography there would mean a second renderer, and a second renderer would drift from the first — a
+preview that is approximately right is more misleading than one that plainly is not the thing you
+are about to paste.
+
 ## Images
 
 `![](diagram.png)` is resolved against the folder the document is in, so an image next to the note
@@ -182,6 +223,7 @@ Everything else is a small JSON file in the platform's per-user configuration di
 ```json
 {
   "theme": "system",
+  "typesetting": "plain",
   "font_family": "Helvetica Neue",
   "font_size": 16.0,
   "mono_font_family": "JetBrains Mono",
@@ -190,6 +232,8 @@ Everything else is a small JSON file in the platform's per-user configuration di
   "preview_padding": 24.0
 }
 ```
+
+`typesetting` is one of `plain`, `wechat`, `toutiao`, `xiaohongshu` or `zhihu` — the layout above.
 
 Every key but `theme` is optional, and leaving one out keeps the built-in default — so a file that
 only says `{"theme": "dark"}` is complete. Values out of range are pulled back into range rather
@@ -208,8 +252,8 @@ overwritten. Keep a copy if anything in it mattered.
 
 ## The status bar
 
-Along the bottom of the window: how much the active document holds, on the left, and the settings
-button on the right.
+Along the bottom of the window: how much the active document holds, on the left, and three controls
+on the right — **Copy**, the layout dropdown, and the settings button.
 
 The count reads `245 characters · 12 lines`, and it is taken from the editor's buffer rather than
 from a copy made when the file was opened — so it keeps up as you type, and re-counts the document
@@ -320,7 +364,8 @@ Release builds are **unsigned**. That has real consequences:
 
 ```
 crates/
-  md-core/     pure logic: documents, file I/O, settings, the recent list, images, export — no GPUI
+  md-core/     pure logic: documents, file I/O, settings, the recent list, images, export and the
+               platform layouts — no GPUI
   md-app/      the `md` binary: GPUI views and layout, and the packaging config
 assets/
   make-icon.py  draws every icon below; only the standard library
@@ -355,6 +400,8 @@ CHANGELOG.md   what each version changed — the release notes, not a summary of
 - [x] **A settings panel and a status bar** — <kbd>Cmd</kbd>+<kbd>,</kbd> opens a panel over every
       setting the file holds, the preview gains a margin, and the size of the active document is
       reported along the bottom of the window
+- [x] **Layouts for self-media** — 公众号 / 今日头条 / 小红书 / 知乎, applied to the export and to
+      <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>'s rich-text copy, with relative images inlined
 - [ ] **Next** — a native menu bar, and synchronised scrolling if the editor's scroll extent ever
       becomes reachable (see [Known gaps](#known-gaps))
 

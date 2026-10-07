@@ -6,6 +6,7 @@
 //! derives the same way by hand, for the same reason.
 
 use gpui_kit::actions;
+use md_core::typeset::Platform;
 
 actions!(
     md,
@@ -17,7 +18,8 @@ actions!(
         OpenFile,
         Save,
         SaveAs,
-        ExportHtml
+        ExportHtml,
+        CopyLayout
     ]
 );
 
@@ -40,3 +42,13 @@ pub struct SelectTab(pub usize);
 #[derive(Clone, PartialEq, Default, Debug, gpui_kit::Action)]
 #[action(namespace = md, no_json)]
 pub struct CloseTabAt(pub usize);
+
+/// Lay the document out for a platform from now on, when exporting or copying.
+///
+/// A parameterised action for the same reason as the two above, and dispatched
+/// rather than called directly so the status bar's menu and the settings panel
+/// reach one handler between them. What it sets is a setting, so the choice
+/// outlives the window it was made in.
+#[derive(Clone, PartialEq, Default, Debug, gpui_kit::Action)]
+#[action(namespace = md, no_json)]
+pub struct SetTypesetting(pub Platform);
