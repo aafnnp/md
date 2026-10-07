@@ -24,12 +24,12 @@ use gpui_kit::*;
 
 use md_core::fs;
 use md_core::recent::{self, RecentFiles};
-use md_core::typeset::{self, Platform};
+use md_core::typeset::{self, Platform, Style};
 use md_core::{Counts, Document, counts, export};
 
 use crate::actions::{
     CloseTab, CloseTabAt, CopyLayout, ExportHtml, OpenFile, OpenSettings, Quit, Save, SaveAs,
-    SelectTab, SetTypesetting, ToggleTheme,
+    SelectTab, SetStyle, SetTypesetting, ToggleTheme,
 };
 use crate::clipboard;
 use crate::settings::{self, AppSettings};
@@ -673,21 +673,26 @@ impl Workspace {
             // the panel can be left open for as long as the user likes, and the
             // menu behind it is still live.
             let written = this.update(cx, |_, cx| {
-                let platform = AppSettings::current(cx).typesetting;
+                let settings = AppSettings::current(cx);
+                let platform = settings.typesetting;
+                let style = settings.typesetting_style;
                 let markdown = tab.read(cx).markdown(cx);
                 let title = tab.read(cx).title();
                 let base = tab.read(cx).base_dir();
                 (
                     platform,
-                    typeset::export(&path, platform, &title, &markdown, base.as_deref()),
+                    style,
+                    typeset::export(&path, platform, style, &title, &markdown, base.as_deref()),
                 )
             });
 
             let note = match written {
                 // The workspace is gone, so there is nowhere to show anything.
                 Err(_) => return,
-                Ok((platform, Ok(()))) => Notification::info(exported_note(platform, &path)),
-                Ok((_, Err(error))) => Notification::error(format!(
+                Ok((platform, style, Ok(()))) => {
+                    Notification::info(exported_note(platform, style, &path))
+                }
+                Ok((_, _, Err(error))) => Notification::error(format!(
                     "Could not export to “{}”: {error}",
                     file_label(&path)
                 )),
@@ -1064,6 +1069,32 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Pick how that layout is dressed.
+    ///
+    /// The same shape as `set_typesetting` above and for the same reasons: it
+    /// reaches nothing on screen but the status bar's own label, so there is no
+    /// theme machinery to run and no repaint beyond the one the notify asks
+    /// for.
+    fn set_style(&mut self, action: &SetStyle, window: &mut Window, cx: &mut Context<Self>) {
+        let mut settings = AppSettings::current(cx);
+        if settings.typesetting_style == action.0 {
+            return;
+        }
+        settings.typesetting_style = action.0;
+        AppSettings::set(settings.clone(), cx);
+
+        if let Err(error) = settings.save() {
+            window.push_notification(
+                Notification::warning(format!(
+                    "The style is {} for now, but saving the setting failed: {error}",
+                    action.0.label()
+                )),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
     /// `Cmd+Shift+C`: put the active tab on the clipboard, laid out for the
     /// chosen platform.
     ///
@@ -1093,14 +1124,18 @@ impl Workspace {
             return;
         }
 
+        let style = AppSettings::current(cx).typesetting_style;
         let markdown = tab.read(cx).markdown(cx);
         let base = tab.read(cx).base_dir();
-        let layout = typeset::fragment(platform, &markdown, base.as_deref());
+        let layout = typeset::fragment(platform, style, &markdown, base.as_deref());
 
         match clipboard::copy(&layout) {
             Ok(()) => {
                 window.push_notification(
-                    Notification::info(format!("Copied the {} layout", platform.label())),
+                    Notification::info(format!(
+                        "Copied the {} layout",
+                        dressed_as(platform, style)
+                    )),
                     cx,
                 );
                 // Said afterwards rather than instead: the copy did work, and
@@ -1155,7 +1190,9 @@ impl Workspace {
     /// "0 characters": a document that does not exist has no size, and a zero
     /// would suggest one that is merely empty.
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let platform = AppSettings::current(cx).typesetting;
+        let settings = AppSettings::current(cx);
+        let platform = settings.typesetting;
+        let style = settings.typesetting_style;
 
         StatusBar::new()
             .left(div().when(!self.tabs.is_empty(), |this| {
@@ -1185,6 +1222,7 @@ impl Workspace {
                             }),
                     )
                     .child(self.typesetting_menu(platform))
+                    .child(self.style_menu(platform, style))
                     .child(
                         Button::new("settings")
                             .ghost()
@@ -1229,6 +1267,36 @@ impl Workspace {
                     })
             })
     }
+
+    /// The style picker: how the chosen layout is dressed.
+    ///
+    /// Disabled rather than hidden under "No layout", and the trigger keeps its
+    /// place in the row: a control that disappears when another one moves reads
+    /// as a bug, and a greyed one says what is true — there is nothing here to
+    /// dress yet.
+    fn style_menu(&self, current: Platform, selected: Style) -> impl IntoElement {
+        Button::new("style")
+            .ghost()
+            .compact()
+            .label(selected.label())
+            .tooltip("How the exported and copied layout is dressed")
+            .disabled(current == Platform::Plain)
+            // Anchored the same way as the layout picker above, and for the
+            // same reason: both triggers sit in the status bar.
+            .dropdown_menu_with_anchor(gpui_kit::Anchor::BottomLeft, move |menu, _, _| {
+                Style::ALL
+                    .into_iter()
+                    .fold(menu.min_w(px(180.)), |menu, style| {
+                        menu.item(
+                            PopupMenuItem::new(style.label())
+                                .checked(style == selected)
+                                .on_click(move |_, window, cx| {
+                                    window.dispatch_action(Box::new(SetStyle(style)), cx)
+                                }),
+                        )
+                    })
+            })
+    }
 }
 
 /// What the export notification says.
@@ -1238,15 +1306,28 @@ impl Workspace {
 /// and the only other place the choice shows is the status bar. Under
 /// `Plain` it is left out, which keeps the wording this app has always used for
 /// the export that has always existed.
-fn exported_note(platform: Platform, path: &Path) -> String {
+fn exported_note(platform: Platform, style: Style, path: &Path) -> String {
     match platform {
         Platform::Plain => format!("Exported to {}", file_label(path)),
         chosen => format!(
             "Exported the {} layout to {}",
-            chosen.label(),
+            dressed_as(chosen, style),
             file_label(path)
         ),
     }
+}
+
+/// The layout with the style it was dressed in, for a sentence that has to say
+/// which of the two the reader is about to get.
+///
+/// The style is named only when it was actually chosen. Leaving it out
+/// otherwise is not brevity for its own sake: the default style *is* the layout
+/// as the platform draws it, and printing it would name a choice nobody made.
+fn dressed_as(platform: Platform, style: Style) -> String {
+    if platform == Platform::Plain || style == Style::Default {
+        return platform.label().to_string();
+    }
+    format!("{}（{}）", platform.label(), style.label())
 }
 
 /// The numbers the status bar shows, written out.
@@ -1522,6 +1603,7 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::copy_layout))
             .on_action(cx.listener(Self::set_typesetting))
+            .on_action(cx.listener(Self::set_style))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.open_file(window, cx)))
             .child(self.render_tab_strip(cx))
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
@@ -1550,6 +1632,7 @@ mod tests {
     use md_core::Document;
     use md_core::Platform;
     use md_core::RecentFiles;
+    use md_core::Style;
     use md_core::fs::NameError;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2603,6 +2686,44 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The style in force is the one the export writes.
+    ///
+    /// The same round trip again, and for the same reason: `md-core` covers
+    /// what a style does to a layout, so what is being checked here is that the
+    /// second of the two settings actually reaches the export at all. A style
+    /// that was stored, shown in the status bar, and then never read would look
+    /// exactly like this test failing.
+    #[gpui_kit::test]
+    fn exporting_in_a_style_writes_the_styled_page(cx: &mut TestAppContext) {
+        let (window, workspace) = open_workspace(cx);
+        let dir = scratch("export-style");
+        let source = dir.join("note.md");
+        std::fs::write(&source, "# Heading\n\nA paragraph.\n").unwrap();
+
+        let sidebar = workspace.read_with(cx, |workspace, _| workspace.sidebar.clone());
+        sidebar.update(cx, |sidebar, cx| sidebar.open(source, cx));
+
+        // Set directly, as above: dispatching would write the settings file.
+        let mut settings = cx.update(|cx| AppSettings::current(cx));
+        settings.typesetting = Platform::WeChat;
+        settings.typesetting_style = Style::Magazine;
+        cx.update(|cx| AppSettings::set(settings, cx));
+
+        dispatch::<ExportHtml>(window, ExportHtml, cx);
+        let exported = dir.join("note.html");
+        cx.simulate_new_path_selection(|_| Some(exported.clone()));
+        cx.run_until_parked();
+
+        let page = std::fs::read_to_string(&exported).unwrap();
+        // 杂志's rule under a first-level heading, which nothing else writes.
+        assert!(page.contains("border-bottom: 3px solid #111111"), "{page}");
+        // Scaled up rather than left at the platform's own size.
+        assert!(page.contains("font-size: 24px"), "{page}");
+        assert!(!page.contains("font-size: 22px"), "{page}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The save panel opens in the document's own folder: the common case is
     /// an export landing beside the file it came from, so that is where the
     /// dialog should already be looking.
@@ -2743,16 +2864,31 @@ mod tests {
     /// Under the default layout the export says exactly what it always said;
     /// under the others it names the layout, because the choice is not in the
     /// file and the next export may be dressed differently.
+    ///
+    /// The style joins it only when one was chosen — see `dressed_as`.
     #[test]
     fn the_export_notice_names_the_layout_only_when_there_is_one() {
         let path = Path::new("/tmp/note.html");
+        let note = |platform, style| exported_note(platform, style, path);
+
         assert_eq!(
-            exported_note(Platform::Plain, path),
+            note(Platform::Plain, Style::Default),
             "Exported to note.html"
         );
         assert_eq!(
-            exported_note(Platform::WeChat, path),
+            note(Platform::WeChat, Style::Default),
             "Exported the 公众号 layout to note.html"
+        );
+        // A style, on the other hand, is a choice somebody made, and the page
+        // it produced will not look like the last one.
+        assert_eq!(
+            note(Platform::WeChat, Style::Magazine),
+            "Exported the 公众号（杂志） layout to note.html"
+        );
+        // 知乎's own dress under a style it does not have: nothing to say.
+        assert_eq!(
+            note(Platform::Zhihu, Style::Default),
+            "Exported the 知乎 layout to note.html"
         );
     }
 

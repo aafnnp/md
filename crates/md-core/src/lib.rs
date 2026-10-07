@@ -10,6 +10,7 @@ pub mod export;
 pub mod fs;
 pub mod image;
 pub mod recent;
+pub mod scroll;
 pub mod settings;
 pub mod typeset;
 
@@ -18,4 +19,4 @@ pub use document::Document;
 pub use export::to_html_page;
 pub use recent::RecentFiles;
 pub use settings::{Settings, ThemePreference};
-pub use typeset::Platform;
+pub use typeset::{Platform, Style};

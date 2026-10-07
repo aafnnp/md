@@ -6,7 +6,7 @@
 //! derives the same way by hand, for the same reason.
 
 use gpui_kit::actions;
-use md_core::typeset::Platform;
+use md_core::typeset::{Platform, Style};
 
 actions!(
     md,
@@ -52,3 +52,14 @@ pub struct CloseTabAt(pub usize);
 #[derive(Clone, PartialEq, Default, Debug, gpui_kit::Action)]
 #[action(namespace = md, no_json)]
 pub struct SetTypesetting(pub Platform);
+
+/// Dress that layout a particular way from now on.
+///
+/// The second of two axes rather than more entries on the list above: the
+/// platform decides how the document is written, the style decides what it
+/// looks like once it arrives, and a writer wants any pairing of the two. Like
+/// `SetTypesetting` it sets a setting, dispatched so the status bar and the
+/// settings panel share one handler.
+#[derive(Clone, PartialEq, Default, Debug, gpui_kit::Action)]
+#[action(namespace = md, no_json)]
+pub struct SetStyle(pub Style);

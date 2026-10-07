@@ -5,12 +5,13 @@ framework from Zed, using the [gpui-kit](https://github.com/longbridge/gpui-kit)
 
 Two panes: write Markdown on the left, see it rendered on the right, live as you type.
 
-> **Status: early.** M0–M5 are done, apart from clickable task-list checkboxes and synchronised
-> scrolling (see [Known gaps](#known-gaps)). The editor opens, edits, finds, renders, saves and
-> exports Markdown in two panes, keeps tabs and a file tree alongside a list of recently opened
-> files, resolves images relative to the document, lays a document out for 公众号 / 头条 / 小红书 /
-> 知乎 to be exported or copied as rich text, and remembers its theme. Tagged pushes are packaged for
-> macOS, Windows and Linux — see [Releases](#releases).
+> **Status: early.** M0–M5 are done, apart from clickable task-list checkboxes (see
+> [Known gaps](#known-gaps)). The editor opens, edits, finds, renders, saves and exports Markdown in
+> two panes, keeps the preview in step with the source as it scrolls, keeps tabs and a file tree
+> alongside a list of recently opened files, resolves images relative to the document, lays a
+> document out for 公众号 / 头条 / 小红书 / 知乎 in one of three typographic styles to be exported or
+> copied as rich text, and remembers its theme. Tagged pushes are packaged for macOS, Windows and
+> Linux — see [Releases](#releases).
 
 ## Stack
 
@@ -156,6 +157,28 @@ typography there would mean a second renderer, and a second renderer would drift
 preview that is approximately right is more misleading than one that plainly is not the thing you
 are about to paste.
 
+### Styles
+
+The layout decides how a document is *written*; a style decides what it *looks like* once it
+arrives. They are two settings rather than one list of twelve because a writer wants any pairing of
+the two: the same 公众号 reader may want a compact page or a loose one.
+
+| | Scale | Leading | Headings | Body |
+|---|---|---|---|---|
+| 默认 Default | the platform's own | the platform's own | the platform's own | the platform's own |
+| 简约 Minimal | ×0.94 | 1.65 | every decoration stripped | lighter grey |
+| 杂志 Magazine | ×1.10 | 1.95 | a rule under the top three levels | near-black |
+
+**默认 is byte-for-byte what the layout has always produced.** It is not a fourth set of values that
+happens to resemble the others — the style machinery is not entered at all, and `md-core` holds a
+test asserting the exact string this module wrote before styles existed.
+
+A style may only touch **font size, line height, colour and heading decoration**. It never changes a
+tag name, whether a `class` survives, or where anything sits — those are the platform's cleaning
+rules, not a matter of taste, and a style that reached them would silently undo the layout. Sizes
+are rounded to whole pixels, because `font-size: 15.04px` is a number nobody chose. The style
+picker greys out under **No layout**: there is nothing to dress without one.
+
 ## Images
 
 `![](diagram.png)` is resolved against the folder the document is in, so an image next to the note
@@ -169,8 +192,8 @@ guessed on its behalf: the document's images resolve when the document has somew
 
 ## Known gaps
 
-Two things the plan called for are missing, both because the component underneath stops short of
-what they need. They are left out rather than shipped as knobs that do nothing.
+One thing the plan called for is missing, because the component underneath stops short of what it
+needs. It is left out rather than shipped as a knob that does nothing.
 
 **Clickable task-list checkboxes.** `- [x]` renders as a checkbox, but clicking it does nothing.
 `gpui-base` draws that checkbox as a static `div` with no id, no click handler and no hook
@@ -180,15 +203,26 @@ plugin that redraws every item, which would look different from every other list
 would stop tracking future fixes upstream. Writing back to the source is a further piece of work on
 top of that.
 
-**Synchronised scrolling.** The preview half is reachable: `TextViewState::list_state()` reports the
-current and maximum scroll, so a position can be read and a position can be set. The source half is
-not. `EditorState` can be *told* and *told about* a scroll offset (`scroll_offset`,
-`set_scroll_offset`), but nothing public reports how far it can scroll, and nothing public reports
-that it scrolled at all — `InputBaseState::on_scroll_wheel` is `pub(super)`. A ratio needs both ends,
-and the one hook that is reachable, `InteractiveElement::on_scroll_wheel`, sees wheel events only: a
-link built on it would quietly come apart the moment either pane was scrolled by keyboard. Left out
-rather than shipped as half a link, and revivable — if a later `gpui-kit` exposes the editor's scroll
-extent, this is a subscription and a division away.
+**The synchronised scrolling here is proportional, not line for line.** This section used to say it
+could not be done at all. Half of that was wrong, and the wrong half is worth writing down.
+
+The claim was that nothing public reports that the editor scrolled. That is true of
+`InputBaseState::on_scroll_wheel`, which is `pub(super)` — but it is not the only route. Every path
+that moves the editor's scroll offset — the wheel, a page key, a dragged scrollbar, the caret
+following a keystroke — goes through `update_scroll_offset`, which calls `cx.notify()` once the
+offset has actually changed. `Context::observe` sees that. So the source pane can be watched after
+all: the app holds a subscription on the editor and reads `scroll_offset()` each time it fires.
+
+What is still out of reach is the editor's scroll *extent*. `scroll_size` and `scroll_handle` are
+`pub(crate)` with no getter, and `display_map` is `pub(super)`, so there is no way to ask how far
+the source can scroll. Its extent is therefore estimated as `lines × line height − viewport height`,
+and the two panes are kept at the same *fraction* of their own ranges. They travel together rather
+than row by row. Soft-wrapped and folded lines make the real content taller than the estimate counts,
+so the estimate runs short and the preview reaches the end slightly before the source does.
+
+The link is one-way, source to preview. Following in both directions needs a way to tell a scroll
+this app caused from one the user made, and without it the panes chase each other and jitter.
+Scrolling the preview alone is left as what it plainly looks like: reading.
 
 ## Settings
 
@@ -203,6 +237,11 @@ text system as the panel opens; the sizes are every whole point from 8 to 48, th
 below accepts. Both are searchable, because several hundred families is not a list to scroll. Once
 something is chosen an ✕ appears beside it, and clearing it is how you ask for the theme's own font
 or size back — the same thing a missing key in the file means.
+
+The layout and the style are rows of radios rather than dropdowns — five and three options fit a row
+without a list to open. **Sync scroll** is two more, 跟随 and 不跟随, and it is on by default:
+preview-follows-source is what you want until you have a reason otherwise, and the file records the
+reason rather than the default.
 
 The source column's width and the preview's padding stay typed: any value in their ranges is a real
 choice, and no list of them would help. Those two apply the moment their text is usable, so a number
@@ -224,6 +263,7 @@ Everything else is a small JSON file in the platform's per-user configuration di
 {
   "theme": "system",
   "typesetting": "plain",
+  "typesetting_style": "default",
   "font_family": "Helvetica Neue",
   "font_size": 16.0,
   "mono_font_family": "JetBrains Mono",
@@ -233,7 +273,8 @@ Everything else is a small JSON file in the platform's per-user configuration di
 }
 ```
 
-`typesetting` is one of `plain`, `wechat`, `toutiao`, `xiaohongshu` or `zhihu` — the layout above.
+`typesetting` is one of `plain`, `wechat`, `toutiao`, `xiaohongshu` or `zhihu` — the layouts above.
+`typesetting_style` is one of `default`, `minimal` or `magazine` — the styles under them.
 
 Every key but `theme` is optional, and leaving one out keeps the built-in default — so a file that
 only says `{"theme": "dark"}` is complete. Values out of range are pulled back into range rather
@@ -252,8 +293,8 @@ overwritten. Keep a copy if anything in it mattered.
 
 ## The status bar
 
-Along the bottom of the window: how much the active document holds, on the left, and three controls
-on the right — **Copy**, the layout dropdown, and the settings button.
+Along the bottom of the window: how much the active document holds, on the left, and four controls
+on the right — **Copy**, the layout dropdown, the style dropdown, and the settings button.
 
 The count reads `245 characters · 12 lines`, and it is taken from the editor's buffer rather than
 from a copy made when the file was opened — so it keeps up as you type, and re-counts the document
@@ -402,8 +443,9 @@ CHANGELOG.md   what each version changed — the release notes, not a summary of
       reported along the bottom of the window
 - [x] **Layouts for self-media** — 公众号 / 今日头条 / 小红书 / 知乎, applied to the export and to
       <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>'s rich-text copy, with relative images inlined
-- [ ] **Next** — a native menu bar, and synchronised scrolling if the editor's scroll extent ever
-      becomes reachable (see [Known gaps](#known-gaps))
+- [x] **Synchronised scrolling and typographic styles** — the preview follows the source pane
+      proportionally, and a layout can be dressed as 默认 / 简约 / 杂志
+- [ ] **Next** — a native menu bar
 
 ## License
 

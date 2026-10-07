@@ -33,15 +33,23 @@ publish a version that has no section. See [Releasing](#releasing) at the bottom
   chosen, nothing about either is different from before. **Relative images are inlined as base64 data
   URIs** so a paste carries its own pictures, and any that could not be read are named rather than
   silently left behind.
+- **Typography styles.** A layout says how a document is *written*; a style says what it *looks
+  like* when it arrives. **默认 / 简约 / 杂志** scale the type, set the leading, recolour the text and
+  decide what a heading is decorated with — and nothing else. A style never changes a tag name,
+  whether a `class` survives, or where anything sits: those are the platform's cleaning rules, and a
+  style that reached them would quietly undo the layout it was meant to dress. **默认 is
+  byte-for-byte what the layouts produced before styles existed** — it is the absence of a style
+  rather than a fourth set of numbers. The style is chosen from the status bar, beside the layout,
+  and remembered in the settings file.
 - **Copy the document as rich text.** <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>, or the **Copy**
   button in the status bar, puts the laid-out document on the system clipboard as HTML, with its plain
   text alongside it for anywhere that cannot take the rich form. This is the path a self-media editor
   wants: pasting the Markdown would arrive as literal punctuation, and pasting the exported page would
   arrive as one long paragraph, because its styling lives in a `<head>` those editors discard.
 - **A settings panel.** <kbd>Cmd</kbd>+<kbd>,</kbd>, or the settings button at the right of the
-  status bar, edits every setting the file holds — theme, the layout above, both font families and
-  sizes, the source column's width and the preview's padding. Each one applies the moment it is
-  chosen, and the two
+  status bar, edits every setting the file holds — theme, the layout above and its style, both font
+  families and sizes, the source column's width, the preview's padding and whether the preview
+  follows the source pane. Each one applies the moment it is chosen, and the two
   fields that are still typed refuse text that does not mean a usable number, with the range spelled
   out, rather than clamping it to something you did not ask for.
 - **A status bar.** Along the bottom of the window: how much the active document holds, and the
@@ -49,6 +57,16 @@ publish a version that has no section. See [Releasing](#releasing) at the bottom
 
 ### Fixed
 
+- **The source and the preview did not scroll together.** The two panes were independent, so reading
+  a long document meant moving both by hand and losing your place in one of them. Scrolling the
+  source now carries the preview with it. The follow is **proportional** rather than line for line:
+  the editor does not publish how far it can scroll — its scroll extent and scroll handle are
+  `pub(crate)` with no getter — so its range is estimated from the document's line count and is
+  matched to the preview's by fraction. Soft-wrapped lines make that estimate run short, so the
+  preview reaches the end slightly before the source does. It is one-way, source to preview:
+  following in both directions would need a way to tell a scroll the app caused from one you made,
+  and without it the panes chase each other and jitter. It can be turned off — see **Sync scroll** in
+  the settings panel.
 - **The starter tab could not be closed.** A fresh window opened on an `Untitled` buffer that was
   already dirty — its text was seeded into an empty buffer, and the two did not match — so
   <kbd>Cmd</kbd>+<kbd>W</kbd> asked whether to discard edits nobody had made. It is now a scratch

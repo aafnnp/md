@@ -31,6 +31,7 @@
 //! arrives escaped, which is also why nothing here has to strip anything:
 //! there is no script element to strip.
 
+use std::borrow::Cow;
 use std::io;
 use std::path::Path;
 
@@ -91,6 +92,260 @@ impl Platform {
     }
 }
 
+/// How the body of a laid-out document is dressed.
+///
+/// A second axis, independent of [`Platform`]. The platform decides what the
+/// target editor will *keep* — which tags survive, which attributes are worth
+/// writing at all — and that is a question about the target, not about taste.
+/// The style decides how the surviving document *looks*: its sizes, its
+/// leading, its colours and whether a heading wears a rule. The two do not
+/// interact: no style changes a tag name or an attribute, and no platform
+/// change alters what a style does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Style {
+    /// The platform's own dress, which is this module's output before styles
+    /// existed. The only variant that is not a [`Look`], and the reason its
+    /// output is unchanged: there is nothing here to apply.
+    #[default]
+    Default,
+    /// 简约: a size down, the lines closer together, the colours lighter, and
+    /// no decoration on any heading.
+    Minimal,
+    /// 杂志: a size up, the lines further apart, the colours heavier, and a
+    /// rule under the top three heading levels.
+    Magazine,
+}
+
+impl Style {
+    /// Every style, in the order the settings panel offers them.
+    pub const ALL: [Self; 3] = [Self::Default, Self::Minimal, Self::Magazine];
+
+    /// What the status bar and the settings panel call this one.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "默认",
+            Self::Minimal => "简约",
+            Self::Magazine => "杂志",
+        }
+    }
+
+    /// The rules this style rewrites with. `None` for [`Style::Default`].
+    fn look(self) -> Option<&'static Look> {
+        match self {
+            Self::Default => None,
+            Self::Minimal => Some(&MINIMAL),
+            Self::Magazine => Some(&MAGAZINE),
+        }
+    }
+
+    /// `style`, as this style asks for it, on an element called `source_tag`.
+    ///
+    /// Borrowed rather than rebuilt for [`Style::Default`], so that path does
+    /// no work and allocates nothing — it is the layout the app already had.
+    fn dress<'a>(self, source_tag: &str, style: &'a str) -> Cow<'a, str> {
+        match self.look() {
+            Some(look) => Cow::Owned(look.dress(source_tag, style)),
+            None => Cow::Borrowed(style),
+        }
+    }
+}
+
+/// One style: a set of edits to whatever dress the platform already applies.
+///
+/// Expressed as edits rather than as a second set of complete styles, because
+/// each platform's dress is tuned to that platform — 公众号 reads at 16px,
+/// 今日头条 at 17px — and those choices are not this module's to throw away.
+/// Scaling them keeps the relationship between the two.
+struct Look {
+    /// What every `font-size` is multiplied by, rounded to whole pixels.
+    scale: f32,
+    /// The `line-height` for everything that is not a heading. A heading's
+    /// leading is tuned to its own size and is left alone.
+    leading: &'static str,
+    /// `(what a declaration says, what it says instead)`, compared whole. A
+    /// whole-value comparison is what keeps `4px solid #d9d9d9` and
+    /// `1px solid #d9d9d9` apart: they are a quote's bar and a table's edge,
+    /// and a style has reason to move one without the other.
+    palette: &'static [(&'static str, &'static str)],
+    /// The same, for headings only, and consulted first.
+    ///
+    /// Separate because the platforms' colours are not in one-to-one
+    /// correspondence: `#1a1a1a` is 公众号's *heading* colour and 知乎's *body*
+    /// colour. A single table would take one for the other. Resolving a
+    /// heading here first means the value that comes out — `#2b2b2b`, say — is
+    /// in neither table, so it cannot then be rewritten as body text.
+    heading_palette: &'static [(&'static str, &'static str)],
+    /// What a heading of each level wears, `h1` first. Empty for a level that
+    /// wears nothing beyond what the platform already gave it — minus the
+    /// decoration, which every style strips before this goes on.
+    heading_rules: [&'static str; 6],
+}
+
+/// What a style takes off a heading before putting its own on.
+///
+/// Removed rather than overridden: `padding-left: 10px` followed by a rule that
+/// says nothing about `padding-left` would leave the 10px there, and the two
+/// rules would be read as one declaration set by whoever opens the file.
+const DECORATION: [&str; 4] = [
+    "border-left",
+    "border-bottom",
+    "padding-left",
+    "padding-bottom",
+];
+
+impl Look {
+    /// The platform's `style`, rewritten for an element that the Markdown
+    /// source called `source_tag`.
+    ///
+    /// By source tag rather than by written tag: 小红书 writes `<h1>` as `<h2>`
+    /// and `<h4>`–`<h6>` as `<h3>`, but a first-level heading is still the
+    /// first-level heading to the reader, and its dress should follow that.
+    fn dress(&self, source_tag: &str, style: &str) -> String {
+        let level = heading_level(source_tag);
+        let heading = level.is_some();
+        let mut out = String::with_capacity(style.len() + 64);
+
+        for declaration in style.split(';') {
+            let declaration = declaration.trim();
+            let Some((name, value)) = declaration.split_once(':') else {
+                continue;
+            };
+            let name = name.trim();
+            let value = value.trim();
+
+            // Whatever the platform hung on a heading is the style's to
+            // replace, so it comes off before anything is added.
+            if heading && DECORATION.contains(&name) {
+                continue;
+            }
+
+            let written = match name {
+                "font-size" => Cow::Owned(whole_pixels(value, self.scale)),
+                "line-height" if !heading => Cow::Borrowed(self.leading),
+                _ => Cow::Borrowed(self.recolour(heading, value)),
+            };
+
+            out.push_str(name);
+            out.push_str(": ");
+            out.push_str(&written);
+            out.push_str("; ");
+        }
+
+        if let Some(level) = level {
+            out.push_str(self.heading_rules[level]);
+        }
+        // The loop leaves a trailing space behind; the `;` stays, so a dressed
+        // style ends the way the recipe it was read from ends.
+        let end = out.trim_end().len();
+        out.truncate(end);
+        out
+    }
+
+    /// What `value` becomes under this style's colours.
+    ///
+    /// A value in neither table is handed back as it was: a style is a set of
+    /// choices about the colours it names, not a claim about the rest.
+    fn recolour<'a>(&self, heading: bool, value: &'a str) -> &'a str {
+        if heading
+            && let Some((_, to)) = self.heading_palette.iter().find(|(from, _)| *from == value)
+        {
+            return to;
+        }
+        match self.palette.iter().find(|(from, _)| *from == value) {
+            Some((_, to)) => to,
+            None => value,
+        }
+    }
+}
+
+/// Which heading `tag` is, counting from zero, or `None` for anything else.
+fn heading_level(tag: &str) -> Option<usize> {
+    let level = tag.strip_prefix('h')?.parse::<usize>().ok()?;
+    (1..=6).contains(&level).then(|| level - 1)
+}
+
+/// A pixel size multiplied by `scale` and rounded to a whole one.
+///
+/// `16px` at 0.94 is 15.04px, and a size with a fraction in it is a size the
+/// author did not choose, printed to a place no editor will show it. Anything
+/// that is not a pixel length — a percentage, a keyword — is left as written
+/// rather than guessed at.
+fn whole_pixels(value: &str, scale: f32) -> String {
+    match value.strip_suffix("px").map(str::parse::<f32>) {
+        Some(Ok(size)) => format!("{}px", (size * scale).round()),
+        _ => value.to_string(),
+    }
+}
+
+/// 简约: quieter than any platform's own dress, and undecorated.
+static MINIMAL: Look = Look {
+    scale: 0.94,
+    leading: "1.65",
+    heading_palette: &[
+        ("#1a1a1a", "#2b2b2b"),
+        ("#222222", "#2b2b2b"),
+        ("#121212", "#2b2b2b"),
+    ],
+    palette: &[
+        // Body text, once per platform's own choice of it.
+        ("#3f3f3f", "#555555"),
+        ("#333333", "#555555"),
+        ("#1a1a1a", "#555555"),
+        // Quoted and secondary text, which goes a shade lighter again.
+        ("#555555", "#6e6e6e"),
+        ("#666666", "#6e6e6e"),
+        ("#646464", "#6e6e6e"),
+        ("#888888", "#9a9a9a"),
+        // Links, all three platforms' colours, to one that sits back.
+        ("#576b95", "#4a6fa5"),
+        ("#1e6fd9", "#4a6fa5"),
+        ("#175199", "#4a6fa5"),
+        // The bar down the side of a quote, as each platform writes it.
+        ("4px solid #d9d9d9", "2px solid #d0d0d0"),
+        ("4px solid #f04142", "2px solid #d0d0d0"),
+        ("3px solid #dddddd", "2px solid #d0d0d0"),
+        ("3px solid #d3d3d3", "2px solid #d0d0d0"),
+    ],
+    heading_rules: ["", "", "", "", "", ""],
+};
+
+/// 杂志: larger, more open, and ruled under the top three levels.
+static MAGAZINE: Look = Look {
+    scale: 1.10,
+    leading: "1.95",
+    heading_palette: &[
+        ("#1a1a1a", "#000000"),
+        ("#222222", "#000000"),
+        ("#121212", "#000000"),
+    ],
+    palette: &[
+        // Body text. 知乎's is already `#1a1a1a` and so needs no entry.
+        ("#3f3f3f", "#1a1a1a"),
+        ("#333333", "#1a1a1a"),
+        // Secondary text darkens rather than fades: this is the loud style.
+        ("#555555", "#444444"),
+        ("#666666", "#444444"),
+        ("#646464", "#444444"),
+        ("#888888", "#6a6a6a"),
+        ("#576b95", "#9a3324"),
+        ("#1e6fd9", "#9a3324"),
+        ("#175199", "#9a3324"),
+        ("4px solid #d9d9d9", "4px solid #111111"),
+        ("4px solid #f04142", "4px solid #111111"),
+        ("3px solid #dddddd", "4px solid #111111"),
+        ("3px solid #d3d3d3", "4px solid #111111"),
+    ],
+    heading_rules: [
+        "padding-bottom: 10px; border-bottom: 3px solid #111111;",
+        "padding-bottom: 8px; border-bottom: 2px solid #111111;",
+        "padding-bottom: 4px; border-bottom: 1px solid #d8d8d8;",
+        "",
+        "",
+        "",
+    ],
+};
+
 /// A document after it has been laid out for a platform.
 pub struct Layout {
     /// The HTML the platform's editor is meant to be handed.
@@ -108,26 +363,42 @@ pub struct Layout {
 ///
 /// This is what goes on the clipboard: a paste target wants the fragment, not
 /// a document it would have to find the body inside.
-pub fn fragment(platform: Platform, markdown: &str, base_dir: Option<&Path>) -> Layout {
+pub fn fragment(
+    platform: Platform,
+    style: Style,
+    markdown: &str,
+    base_dir: Option<&Path>,
+) -> Layout {
     let compiled = export::to_html_fragment(markdown);
     if platform == Platform::Plain {
         return Layout {
-            plain: lay_out(&compiled, &NO_LAYOUT, None).plain,
+            plain: lay_out(&compiled, &NO_LAYOUT, Style::Default, None).plain,
             html: compiled,
             unresolved_images: Vec::new(),
         };
     }
-    lay_out(&compiled, platform.recipe(), base_dir)
+    lay_out(&compiled, platform.recipe(), style, base_dir)
 }
 
 /// A complete page, for saving to a file and opening in a browser.
-pub fn page(platform: Platform, title: &str, markdown: &str, base_dir: Option<&Path>) -> String {
+///
+/// A style on [`Platform::Plain`] does nothing: that page is styled by the
+/// stylesheet in its own head, and a style here would have to become a second
+/// one. No layout means nothing to dress.
+pub fn page(
+    platform: Platform,
+    style: Style,
+    title: &str,
+    markdown: &str,
+    base_dir: Option<&Path>,
+) -> String {
     if platform == Platform::Plain {
         return export::to_html_page(title, markdown);
     }
     let body = lay_out(
         &export::to_html_fragment(markdown),
         platform.recipe(),
+        style,
         base_dir,
     );
     standalone_page(title, &body.html)
@@ -137,11 +408,12 @@ pub fn page(platform: Platform, title: &str, markdown: &str, base_dir: Option<&P
 pub fn export(
     path: &Path,
     platform: Platform,
+    style: Style,
     title: &str,
     markdown: &str,
     base_dir: Option<&Path>,
 ) -> io::Result<()> {
-    std::fs::write(path, page(platform, title, markdown, base_dir))
+    std::fs::write(path, page(platform, style, title, markdown, base_dir))
 }
 
 /// A laid-out fragment wrapped in the smallest page that stands on its own.
@@ -687,11 +959,14 @@ const BLOCK: [&str; 15] = [
 ];
 
 /// Rewrite `fragment` as `recipe` asks, and read it back as text on the way.
-fn lay_out(fragment: &str, recipe: &Recipe, base_dir: Option<&Path>) -> Layout {
+fn lay_out(fragment: &str, recipe: &Recipe, style: Style, base_dir: Option<&Path>) -> Layout {
     let mut html = String::with_capacity(fragment.len() + fragment.len() / 2 + 64);
     let mut plain = String::with_capacity(fragment.len() / 2);
     let mut unresolved_images = Vec::new();
-    let mut style = String::new();
+    // Reused per element: cleared, filled with whatever this element wears, and
+    // written out. Named apart from the `style` argument, which is the dress
+    // being applied to it.
+    let mut rules = String::new();
     let mut pre_depth = 0usize;
     // The name of an element whose tags are being left out, if any. Only ever
     // one deep: the parser writes `sr-only` on a heading that holds nothing.
@@ -700,7 +975,10 @@ fn lay_out(fragment: &str, recipe: &Recipe, base_dir: Option<&Path>) -> Layout {
     if !recipe.wrapper.is_empty() {
         html.push('<');
         html.push_str(recipe.wrapper);
-        push_style(&mut html, recipe.wrapper_style);
+        push_style(
+            &mut html,
+            &style.dress(recipe.wrapper, recipe.wrapper_style),
+        );
         html.push('>');
     }
 
@@ -764,7 +1042,7 @@ fn lay_out(fragment: &str, recipe: &Recipe, base_dir: Option<&Path>) -> Layout {
             continue;
         }
 
-        style.clear();
+        rules.clear();
         let mapped = recipe.element(tag.name);
 
         if !tag.opening {
@@ -791,11 +1069,12 @@ fn lay_out(fragment: &str, recipe: &Recipe, base_dir: Option<&Path>) -> Layout {
                 // `<code>` inside a `<pre>` is the block's own body, not a
                 // phrase in a sentence: the inline pill's background and
                 // padding would draw a second box inside the first.
-                style.push_str(if to == "code" && pre_depth > 0 {
+                let element_style = if to == "code" && pre_depth > 0 {
                     recipe.code_in_pre
                 } else {
                     element_style
-                });
+                };
+                rules.push_str(&style.dress(tag.name, element_style));
                 to
             }
             None => tag.name,
@@ -804,8 +1083,11 @@ fn lay_out(fragment: &str, recipe: &Recipe, base_dir: Option<&Path>) -> Layout {
         // A task item's `<ul>`: the `☑` replaces the bullet, so the bullet has
         // to go. The parser marks nothing on the list itself — the checkbox is
         // the only sign — so the item is recognised by looking one tag ahead.
+        //
+        // Not dressed: how a list aligns is structure, not dress, and a style
+        // that changed it would move the tick out from under the text.
         if name == "ul" && recipe.checkboxes_as_text && starts_a_task_item(fragment, at) {
-            style.push_str(recipe.task_list_style);
+            rules.push_str(recipe.task_list_style);
         }
 
         html.push('<');
@@ -826,7 +1108,7 @@ fn lay_out(fragment: &str, recipe: &Recipe, base_dir: Option<&Path>) -> Layout {
                 html.push('"');
             }
         }
-        push_style(&mut html, &style);
+        push_style(&mut html, &rules);
         if tag.self_closing {
             html.push_str(" /");
         }
@@ -1294,7 +1576,7 @@ A footnote[^note].
 
     #[test]
     fn a_section_replaces_a_heading_the_platform_will_not_take() {
-        let wechat = fragment(Platform::WeChat, "## H2\n", None).html;
+        let wechat = fragment(Platform::WeChat, Style::Default, "## H2\n", None).html;
         assert!(!wechat.contains("<h2"), "{wechat}");
         assert!(
             wechat.contains("border-left: 4px solid #07c160"),
@@ -1304,7 +1586,7 @@ A footnote[^note].
         assert_eq!(wechat.matches("<section style=").count(), 2, "{wechat}");
 
         // 今日头条 takes real headings, and dresses them its own way.
-        let toutiao = fragment(Platform::Toutiao, "## H2\n", None).html;
+        let toutiao = fragment(Platform::Toutiao, Style::Default, "## H2\n", None).html;
         assert!(toutiao.contains("<h2 style="), "{toutiao}");
         assert!(
             toutiao.contains("border-bottom: 2px solid #f04142"),
@@ -1313,7 +1595,13 @@ A footnote[^note].
 
         // 小红书 keeps two levels rather than one: the top two headings arrive
         // as `<h2>`, the rest as `<h3>`.
-        let xiaohongshu = fragment(Platform::Xiaohongshu, "# One\n\n### Three\n", None).html;
+        let xiaohongshu = fragment(
+            Platform::Xiaohongshu,
+            Style::Default,
+            "# One\n\n### Three\n",
+            None,
+        )
+        .html;
         assert_eq!(
             xiaohongshu.matches("<h2 style=").count(),
             1,
@@ -1355,7 +1643,7 @@ A footnote[^note].
     fn every_element_the_compiler_writes_carries_its_style() {
         for platform in [Platform::WeChat, Platform::Toutiao, Platform::Zhihu] {
             let recipe = platform.recipe();
-            let layout = fragment(platform, EVERYTHING, None);
+            let layout = fragment(platform, Style::Default, EVERYTHING, None);
             let tags = opening_tags(&layout.html);
             assert!(tags.len() > 1, "{}", layout.html);
 
@@ -1386,7 +1674,7 @@ A footnote[^note].
     /// normaliser, which would rewrite anything it was given anyway.
     #[test]
     fn the_xiaohongshu_recipe_styles_only_what_it_names() {
-        let layout = fragment(Platform::Xiaohongshu, EVERYTHING, None);
+        let layout = fragment(Platform::Xiaohongshu, Style::Default, EVERYTHING, None);
         assert!(layout.html.contains("<p style="), "{}", layout.html);
         assert!(
             layout.html.contains("<blockquote style="),
@@ -1410,7 +1698,7 @@ A footnote[^note].
     /// document that claims a styling it does not have.
     #[test]
     fn no_class_or_style_block_survives_the_wechat_layout() {
-        let layout = fragment(Platform::WeChat, EVERYTHING, None);
+        let layout = fragment(Platform::WeChat, Style::Default, EVERYTHING, None);
         assert!(!layout.html.contains("class="), "{}", layout.html);
         assert!(!layout.html.contains("id="), "{}", layout.html);
         assert!(!layout.html.contains("<style"), "{}", layout.html);
@@ -1422,7 +1710,12 @@ A footnote[^note].
     /// stopped holding, this scanner would be reading a document as markup.
     #[test]
     fn raw_html_in_the_source_stays_escaped() {
-        let layout = fragment(Platform::WeChat, "<script>alert(1)</script>\n", None);
+        let layout = fragment(
+            Platform::WeChat,
+            Style::Default,
+            "<script>alert(1)</script>\n",
+            None,
+        );
         assert!(!layout.html.contains("<script>"), "{}", layout.html);
         assert!(layout.html.contains("&lt;script&gt;"), "{}", layout.html);
     }
@@ -1434,7 +1727,7 @@ A footnote[^note].
     fn the_footnote_label_is_left_out_rather_than_shown() {
         // 知乎 keeps classes, so this is the recipe where leaving it in would
         // have been most visible.
-        let layout = fragment(Platform::Zhihu, EVERYTHING, None);
+        let layout = fragment(Platform::Zhihu, Style::Default, EVERYTHING, None);
         assert!(!layout.html.contains("sr-only"), "{}", layout.html);
         assert!(!layout.html.contains("Footnotes"), "{}", layout.html);
         // The note itself is the document, and stays.
@@ -1443,7 +1736,12 @@ A footnote[^note].
 
     #[test]
     fn a_task_list_loses_its_input_and_keeps_its_marks() {
-        let layout = fragment(Platform::WeChat, "- [x] done\n- [ ] todo\n", None);
+        let layout = fragment(
+            Platform::WeChat,
+            Style::Default,
+            "- [x] done\n- [ ] todo\n",
+            None,
+        );
         assert!(layout.html.contains("☑ done"), "{}", layout.html);
         assert!(layout.html.contains("☐ todo"), "{}", layout.html);
         assert!(!layout.html.contains("<input"), "{}", layout.html);
@@ -1454,7 +1752,7 @@ A footnote[^note].
     /// An ordinary list is not a task list, and must keep its bullets.
     #[test]
     fn a_plain_list_keeps_its_bullets() {
-        let layout = fragment(Platform::WeChat, "- one\n- two\n", None);
+        let layout = fragment(Platform::WeChat, Style::Default, "- one\n- two\n", None);
         assert!(!layout.html.contains("list-style: none"), "{}", layout.html);
     }
 
@@ -1462,16 +1760,28 @@ A footnote[^note].
     /// inside the first.
     #[test]
     fn code_inside_a_block_loses_the_inline_pill() {
-        let block = fragment(Platform::WeChat, "```\nlet x = 1;\n```\n", None).html;
+        let block = fragment(
+            Platform::WeChat,
+            Style::Default,
+            "```\nlet x = 1;\n```\n",
+            None,
+        )
+        .html;
         assert!(block.contains("background: none; padding: 0;"), "{block}");
         assert!(!block.contains("background: #f0f1f3"), "{block}");
 
         // ...and code in a sentence keeps it.
-        let inline = fragment(Platform::WeChat, "a `b` c\n", None).html;
+        let inline = fragment(Platform::WeChat, Style::Default, "a `b` c\n", None).html;
         assert!(inline.contains("background: #f0f1f3"), "{inline}");
 
         // 小红书 leaves both alone, which is a silence and not an empty claim.
-        let bare = fragment(Platform::Xiaohongshu, "```\nlet x = 1;\n```\n", None).html;
+        let bare = fragment(
+            Platform::Xiaohongshu,
+            Style::Default,
+            "```\nlet x = 1;\n```\n",
+            None,
+        )
+        .html;
         assert!(bare.contains("<pre>"), "{bare}");
         assert!(bare.contains("<code>"), "{bare}");
         assert!(!bare.contains("<code style"), "{bare}");
@@ -1487,6 +1797,7 @@ A footnote[^note].
 
         let layout = fragment(
             Platform::WeChat,
+            Style::Default,
             "![a picture](shot.png)\n",
             Some(dir.as_path()),
         );
@@ -1518,7 +1829,12 @@ A footnote[^note].
         assert!(unresolved.is_empty(), "{unresolved:?}");
 
         // The same thing end to end, whichever way the compiler spells it.
-        let layout = fragment(Platform::WeChat, "![](a&b.png)\n", Some(dir.as_path()));
+        let layout = fragment(
+            Platform::WeChat,
+            Style::Default,
+            "![](a&b.png)\n",
+            Some(dir.as_path()),
+        );
         assert!(
             layout.unresolved_images.is_empty(),
             "{:?}",
@@ -1537,7 +1853,12 @@ A footnote[^note].
     fn an_image_that_is_not_on_disk_is_left_as_written_and_reported() {
         let dir = scratch("missing-image");
 
-        let layout = fragment(Platform::WeChat, "![](gone.png)\n", Some(dir.as_path()));
+        let layout = fragment(
+            Platform::WeChat,
+            Style::Default,
+            "![](gone.png)\n",
+            Some(dir.as_path()),
+        );
         assert_eq!(layout.unresolved_images, vec!["gone.png".to_string()]);
         assert!(layout.html.contains("src=\"gone.png\""), "{}", layout.html);
 
@@ -1551,6 +1872,7 @@ A footnote[^note].
         for url in ["https://example.com/a.png", "http://example.com/a.png"] {
             let layout = fragment(
                 Platform::WeChat,
+                Style::Default,
                 &format!("![]({url})\n"),
                 Some(dir.as_path()),
             );
@@ -1583,7 +1905,7 @@ A footnote[^note].
     /// files that were never looked for.
     #[test]
     fn an_unsaved_document_reports_no_missing_images() {
-        let layout = fragment(Platform::WeChat, "![](shot.png)\n", None);
+        let layout = fragment(Platform::WeChat, Style::Default, "![](shot.png)\n", None);
         assert!(layout.unresolved_images.is_empty());
         assert!(layout.html.contains("src=\"shot.png\""), "{}", layout.html);
     }
@@ -1598,7 +1920,12 @@ A footnote[^note].
         file.set_len(MAX_EMBEDDED_IMAGE_BYTES + 1).unwrap();
         drop(file);
 
-        let layout = fragment(Platform::WeChat, "![big](big.png)\n", Some(dir.as_path()));
+        let layout = fragment(
+            Platform::WeChat,
+            Style::Default,
+            "![big](big.png)\n",
+            Some(dir.as_path()),
+        );
         assert_eq!(layout.unresolved_images, vec!["big.png".to_string()]);
         assert!(layout.html.contains("src=\"big.png\""), "{}", layout.html);
 
@@ -1607,27 +1934,37 @@ A footnote[^note].
 
     #[test]
     fn the_plain_text_is_the_document_without_its_markup() {
-        let layout = fragment(Platform::WeChat, "# 标题\n\nFish & chips\n", None);
+        let layout = fragment(
+            Platform::WeChat,
+            Style::Default,
+            "# 标题\n\nFish & chips\n",
+            None,
+        );
         assert!(!layout.plain.contains('<'), "{}", layout.plain);
         assert_eq!(layout.plain, "标题\n\nFish & chips");
 
         // The parser's escaping is read back, and an entity in the source
         // becomes the character it stands for.
-        let entities = fragment(Platform::WeChat, "a &amp; b\n", None);
+        let entities = fragment(Platform::WeChat, Style::Default, "a &amp; b\n", None);
         assert_eq!(entities.plain, "a & b");
-        let angle = fragment(Platform::WeChat, "1 &lt; 2\n", None);
+        let angle = fragment(Platform::WeChat, Style::Default, "1 &lt; 2\n", None);
         assert_eq!(angle.plain, "1 < 2");
     }
 
     #[test]
     fn an_image_carries_its_alt_text_into_the_plain_text() {
-        let layout = fragment(Platform::WeChat, "![a diagram](shot.png)\n", None);
+        let layout = fragment(
+            Platform::WeChat,
+            Style::Default,
+            "![a diagram](shot.png)\n",
+            None,
+        );
         assert_eq!(layout.plain, "a diagram");
     }
 
     #[test]
     fn an_empty_document_is_just_the_wrapper() {
-        let layout = fragment(Platform::WeChat, "", None);
+        let layout = fragment(Platform::WeChat, Style::Default, "", None);
         assert!(layout.plain.is_empty(), "{}", layout.plain);
         assert!(
             layout.html.starts_with("<section style="),
@@ -1645,6 +1982,7 @@ A footnote[^note].
     fn a_title_holding_a_quote_does_not_run_the_scan_past_the_tag() {
         let layout = fragment(
             Platform::WeChat,
+            Style::Default,
             "[x](https://e.com 'say \"hi\"')\n\nA second paragraph.\n",
             None,
         );
@@ -1659,7 +1997,7 @@ A footnote[^note].
 
     #[test]
     fn the_page_for_a_platform_is_a_complete_document() {
-        let whole = page(Platform::Zhihu, "笔记", "# 标题\n", None);
+        let whole = page(Platform::Zhihu, Style::Default, "笔记", "# 标题\n", None);
         assert!(whole.starts_with("<!DOCTYPE html>"), "{whole}");
         assert!(whole.contains("<meta charset=\"utf-8\">"), "{whole}");
         assert!(whole.contains("<title>笔记</title>"), "{whole}");
@@ -1667,7 +2005,7 @@ A footnote[^note].
         assert!(whole.ends_with("</html>\n"), "{whole}");
 
         // The title is the user's file name, so it is escaped like any other.
-        let escaped = page(Platform::Zhihu, "a & b <c>", "", None);
+        let escaped = page(Platform::Zhihu, Style::Default, "a & b <c>", "", None);
         assert!(
             escaped.contains("<title>a &amp; b &lt;c&gt;</title>"),
             "{escaped}"
@@ -1681,16 +2019,21 @@ A footnote[^note].
     fn the_plain_platform_still_produces_what_the_export_always_did() {
         let markdown = "# 标题\n\nA paragraph.\n";
         assert_eq!(
-            page(Platform::Plain, "note", markdown, None),
+            page(Platform::Plain, Style::Default, "note", markdown, None),
             export::to_html_page("note", markdown)
         );
         assert_eq!(
-            fragment(Platform::Plain, markdown, None).html,
+            fragment(Platform::Plain, Style::Default, markdown, None).html,
             export::to_html_fragment(markdown)
         );
 
         // Images included: inlining them is a layout's promise, not this one's.
-        let layout = fragment(Platform::Plain, "![](a.png)\n", Some(Path::new("/tmp")));
+        let layout = fragment(
+            Platform::Plain,
+            Style::Default,
+            "![](a.png)\n",
+            Some(Path::new("/tmp")),
+        );
         assert!(layout.html.contains("src=\"a.png\""), "{}", layout.html);
         assert!(layout.unresolved_images.is_empty());
     }
@@ -1744,5 +2087,288 @@ A footnote[^note].
         // Not a guess, and not a lie either.
         assert_eq!(media_type(Path::new("a.tiff")), "application/octet-stream");
         assert_eq!(media_type(Path::new("a")), "application/octet-stream");
+    }
+
+    // -----------------------------------------------------------------------
+    // Styles
+    // -----------------------------------------------------------------------
+
+    /// The inline style written on the first opening `<name …>` in `html`.
+    ///
+    /// Empty for an element that was written without one, which is a state
+    /// 小红书's recipe puts things in on purpose.
+    fn style_of(html: &str, name: &str) -> String {
+        opening_tags(html)
+            .into_iter()
+            .find(|tag| tag.name == name)
+            .and_then(|tag| tag.attribute("style"))
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Every inline style written on an opening `<name …>`, in document order.
+    fn styles_of(html: &str, name: &str) -> Vec<String> {
+        opening_tags(html)
+            .into_iter()
+            .filter(|tag| tag.name == name)
+            .map(|tag| tag.attribute("style").unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// The layout nobody asked to have styled is the layout this module
+    /// produced before styles existed.
+    ///
+    /// A golden rather than a comparison against a second code path: the claim
+    /// is not that `Default` agrees with something else, it is that `Default`
+    /// is unchanged. A style leaking into the default dress changes this
+    /// string, and nothing else would notice.
+    #[test]
+    fn the_default_style_is_the_platform_layout_byte_for_byte() {
+        // 公众号 `# Title` and one paragraph, every byte of it.
+        assert_eq!(
+            fragment(Platform::WeChat, Style::Default, "# Title\n\nBody.\n", None).html,
+            concat!(
+                r#"<section style="font-size: 16px; line-height: 1.75; color: #3f3f3f;">"#,
+                r#"<section style="margin: 32px 0 16px; padding-left: 10px; "#,
+                r#"border-left: 4px solid #07c160; font-size: 22px; line-height: 1.4; "#,
+                r#"font-weight: bold; color: #1a1a1a;">Title</section>"#,
+                "\n",
+                r#"<p style="margin: 0 0 16px; font-size: 16px; line-height: 1.75; "#,
+                r#"color: #3f3f3f;">Body.</p>"#,
+                "\n",
+                "</section>\n",
+            ),
+        );
+
+        // 今日头条, where the heading keeps its own tag and the wrapper is not
+        // a `<section>` like the other three.
+        assert_eq!(
+            fragment(
+                Platform::Toutiao,
+                Style::Default,
+                "# Title\n\nBody.\n",
+                None
+            )
+            .html,
+            concat!(
+                r#"<section style="font-size: 17px; line-height: 1.8; color: #333333;">"#,
+                r#"<h1 style="margin: 32px 0 18px; padding-bottom: 8px; "#,
+                r#"border-bottom: 2px solid #f04142; font-size: 24px; line-height: 1.4; "#,
+                r#"color: #222222;">Title</h1>"#,
+                "\n",
+                r#"<p style="margin: 0 0 18px; font-size: 17px; line-height: 1.8; "#,
+                r#"color: #333333;">Body.</p>"#,
+                "\n",
+                "</section>\n",
+            ),
+        );
+
+        // 知乎, whose wrapper is a `<div>` and whose recipe is the only one
+        // that carries a heading rule at a level other than the top two.
+        assert_eq!(
+            fragment(Platform::Zhihu, Style::Default, "# Title\n\nBody.\n", None).html,
+            concat!(
+                r#"<div style="font-size: 16px; line-height: 1.7; color: #1a1a1a;">"#,
+                r#"<h1 style="margin: 30px 0 16px; padding-bottom: 6px; "#,
+                r#"border-bottom: 1px solid #e5e5e5; font-size: 24px; line-height: 1.4; "#,
+                r#"color: #121212;">Title</h1>"#,
+                "\n",
+                r#"<p style="margin: 0 0 16px; font-size: 16px; line-height: 1.7; "#,
+                r#"color: #1a1a1a;">Body.</p>"#,
+                "\n",
+                "</div>\n",
+            ),
+        );
+    }
+
+    /// A style is dress. The tag a thing is written as, and whether it carries
+    /// a class, are structure — the platform decides those, and no style may
+    /// touch them.
+    #[test]
+    fn a_style_never_changes_a_tag_name_or_a_class() {
+        let shape = |html: &str| -> Vec<(String, Option<String>)> {
+            opening_tags(html)
+                .into_iter()
+                .map(|tag| {
+                    (
+                        tag.name.to_string(),
+                        tag.attribute("class").map(str::to_string),
+                    )
+                })
+                .collect()
+        };
+
+        for platform in Platform::ALL {
+            let default = fragment(platform, Style::Default, EVERYTHING, None).html;
+            for style in [Style::Minimal, Style::Magazine] {
+                let dressed = fragment(platform, style, EVERYTHING, None).html;
+                assert_eq!(
+                    shape(&default),
+                    shape(&dressed),
+                    "{platform:?} under {style:?} rewrote the structure"
+                );
+            }
+        }
+    }
+
+    /// 简约 undecorates: what the platform hung on a heading comes off, and
+    /// nothing goes back on.
+    #[test]
+    fn minimal_drops_every_heading_decoration() {
+        // A platform whose recipe keeps real `<h*>` tags, so each level can be
+        // found by name.
+        for platform in [Platform::Toutiao, Platform::Zhihu] {
+            let html = fragment(platform, Style::Minimal, EVERYTHING, None).html;
+            for level in 1..=6 {
+                let name = format!("h{level}");
+                let style = style_of(&html, &name);
+                assert!(!style.is_empty(), "{platform:?} <{name}>: {html}");
+                for property in DECORATION {
+                    assert!(
+                        !style.contains(property),
+                        "{platform:?} <{name}> kept {property}: {style}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 杂志 rules under the top three levels and stops there.
+    #[test]
+    fn magazine_puts_a_rule_under_the_top_three_headings() {
+        let html = fragment(Platform::Zhihu, Style::Magazine, EVERYTHING, None).html;
+
+        assert!(
+            style_of(&html, "h1").contains("border-bottom: 3px solid #111111"),
+            "{}",
+            style_of(&html, "h1")
+        );
+        assert!(style_of(&html, "h2").contains("border-bottom: 2px solid #111111"));
+        assert!(style_of(&html, "h3").contains("border-bottom: 1px solid #d8d8d8"));
+        assert!(!style_of(&html, "h4").contains("border-bottom"));
+        assert!(!style_of(&html, "h5").contains("border-bottom"));
+        assert!(!style_of(&html, "h6").contains("border-bottom"));
+
+        // The platform's own rule is replaced rather than left under this one.
+        assert!(
+            !style_of(&html, "h1").contains("#e5e5e5"),
+            "知乎's own rule is still on the heading: {}",
+            style_of(&html, "h1")
+        );
+    }
+
+    /// `#1a1a1a` is 公众号's *heading* colour and 知乎's *body* colour. One
+    /// flat colour table would read whichever it met first as the other.
+    #[test]
+    fn a_heading_colour_is_not_mistaken_for_a_body_colour() {
+        // 公众号 writes headings as `<section>`, and the wrapper is one too, so
+        // the heading is the second of them.
+        let wechat = fragment(Platform::WeChat, Style::Minimal, "# Title\n\nBody.\n", None).html;
+        let heading = styles_of(&wechat, "section")
+            .get(1)
+            .expect("the heading")
+            .clone();
+        assert!(heading.contains("color: #2b2b2b"), "{heading}");
+        assert!(!heading.contains("#555555"), "{heading}");
+
+        // 知乎's body text shares that source colour and must go the other way.
+        let zhihu = fragment(Platform::Zhihu, Style::Minimal, "# Title\n\nBody.\n", None).html;
+        assert!(style_of(&zhihu, "p").contains("color: #555555"));
+        assert!(!style_of(&zhihu, "p").contains("#2b2b2b"));
+
+        // And the same pair under 杂志, where the two ends are further apart.
+        let zhihu = fragment(Platform::Zhihu, Style::Magazine, "# Title\n\nBody.\n", None).html;
+        assert!(style_of(&zhihu, "h1").contains("color: #000000"));
+        assert!(style_of(&zhihu, "p").contains("color: #1a1a1a"));
+    }
+
+    /// A size with a fraction in it is a size nobody chose, printed to a place
+    /// no editor will show it.
+    #[test]
+    fn a_style_scales_every_font_size_to_whole_pixels() {
+        for style in [Style::Minimal, Style::Magazine] {
+            for platform in Platform::ALL {
+                let html = fragment(platform, style, EVERYTHING, None).html;
+                for tag in opening_tags(&html) {
+                    let Some(rules) = tag.attribute("style") else {
+                        continue;
+                    };
+                    for declaration in rules.split(';') {
+                        let Some(size) = declaration.trim().strip_prefix("font-size:") else {
+                            continue;
+                        };
+                        let size = size.trim();
+                        let pixels = size.strip_suffix("px").unwrap_or_else(|| {
+                            panic!("{platform:?} {style:?}: font-size: {size} is not in px")
+                        });
+                        assert!(
+                            pixels.parse::<u32>().is_ok(),
+                            "{platform:?} {style:?}: font-size: {size} has a fraction in it"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The wrapper and inline code carry sizes of their own. A style that
+    /// scaled the elements and not these would leave the document at one size
+    /// and its frame at another.
+    #[test]
+    fn a_style_leaves_the_wrapper_and_inline_code_dressed_too() {
+        let minimal = fragment(Platform::WeChat, Style::Minimal, EVERYTHING, None).html;
+        let wrapper = opening_tags(&minimal)[0]
+            .attribute("style")
+            .unwrap_or_default()
+            .to_string();
+        assert!(wrapper.contains("font-size: 15px"), "{wrapper}");
+        assert!(wrapper.contains("line-height: 1.65"), "{wrapper}");
+        // 14px, the inline pill's own size, taken down with everything else.
+        assert!(style_of(&minimal, "code").contains("font-size: 13px"));
+
+        let magazine = fragment(Platform::WeChat, Style::Magazine, EVERYTHING, None).html;
+        let wrapper = opening_tags(&magazine)[0]
+            .attribute("style")
+            .unwrap_or_default()
+            .to_string();
+        assert!(wrapper.contains("font-size: 18px"), "{wrapper}");
+        assert!(wrapper.contains("line-height: 1.95"), "{wrapper}");
+        assert!(style_of(&magazine, "code").contains("font-size: 15px"));
+    }
+
+    /// A heading's leading is tuned to its own size, so it is the one thing a
+    /// style's `line-height` does not overwrite.
+    #[test]
+    fn a_style_leaves_a_headings_leading_alone() {
+        let html = fragment(Platform::Zhihu, Style::Magazine, "# Title\n", None).html;
+        let heading = style_of(&html, "h1");
+        assert!(heading.contains("line-height: 1.4"), "{heading}");
+        assert!(!heading.contains("1.95"), "{heading}");
+    }
+
+    /// No layout means nothing to dress: 知乎's page has its styling in a
+    /// stylesheet, and a style here would have to become a second one.
+    #[test]
+    fn the_plain_platform_ignores_the_style() {
+        for style in Style::ALL {
+            assert_eq!(
+                fragment(Platform::Plain, style, EVERYTHING, None).html,
+                export::to_html_fragment(EVERYTHING)
+            );
+            assert_eq!(
+                page(Platform::Plain, style, "note", EVERYTHING, None),
+                export::to_html_page("note", EVERYTHING)
+            );
+        }
+    }
+
+    #[test]
+    fn every_style_has_a_label_of_its_own() {
+        let mut labels = Vec::new();
+        for style in Style::ALL {
+            assert!(!labels.contains(&style.label()), "{style:?}");
+            labels.push(style.label());
+        }
+        assert_eq!(labels.len(), Style::ALL.len());
     }
 }

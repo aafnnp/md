@@ -10,6 +10,7 @@ use gpui_kit::base::{TextView, TextViewState};
 use gpui_kit::*;
 
 use md_core::image;
+use md_core::scroll;
 
 use crate::settings::{AppSettings, preview_padding};
 
@@ -58,6 +59,32 @@ impl PreviewPane {
         self.source.push_str(markdown);
         self.state
             .update(cx, |state, cx| state.set_text(markdown, cx));
+    }
+
+    /// Scroll the preview to `fraction` of the way through the document.
+    ///
+    /// Only ever driven by the source pane — the preview does not push back —
+    /// so there is no loop to damp and no need to suppress the echo.
+    ///
+    /// The offset applied here is in the preview's own coordinates, as a share
+    /// of the preview's own scrollable length. That length is the only thing
+    /// the two panes have in common: the editor cannot report its own (see
+    /// [`md_core::scroll`]), and a rendered paragraph is not a line of source
+    /// anyway, so matching proportions is the honest version of "in step".
+    pub fn scroll_to_fraction(&self, fraction: f32, cx: &mut Context<Self>) {
+        {
+            let state = self.state.read(cx);
+            let list = state.list_state();
+            // Two conventions meet here and they run opposite ways: the list
+            // reports how far it *can* scroll as a positive distance, and takes
+            // the position to go to as a negative one. A positive number is
+            // swallowed by a clamp, which looks exactly like a preview that
+            // never moves at all.
+            let max = list.max_offset_for_scrollbar().y.as_f32();
+            list.set_offset_from_scrollbar(point(px(0.), px(-scroll::target(max, fraction))));
+        }
+        // `state` borrows `cx`, so the read above has to be over before this.
+        cx.notify();
     }
 
     /// The Markdown currently rendered.

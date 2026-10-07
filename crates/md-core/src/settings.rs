@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::typeset::Platform;
+use crate::typeset::{Platform, Style};
 
 /// The file name inside the platform's configuration directory.
 pub const FILE_NAME: &str = "settings.json";
@@ -90,6 +90,14 @@ pub struct Settings {
     /// is publishing, and that does not change from one tab to the next. A
     /// field missing from the file becomes the default, `Plain`.
     pub typesetting: Platform,
+    /// How that layout is dressed — see [`crate::typeset::Style`].
+    ///
+    /// A second axis rather than more entries in the list above: the platform
+    /// is which editor the document is going to, the style is what it should
+    /// look like when it arrives, and a writer can want any pairing of the two.
+    /// A field missing from the file becomes the default, `Default`, which is
+    /// the dress the layouts have always had.
+    pub typesetting_style: Style,
     /// Family for everything but the source pane. `None` keeps the one the
     /// theme resolved, which is the platform's own interface font.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,6 +120,17 @@ pub struct Settings {
     /// preview pane. `None` uses the app's own margin.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview_padding: Option<f32>,
+    /// Whether the preview follows the source pane as it scrolls. `None` is
+    /// "it does", which is the behaviour worth having by default.
+    ///
+    /// Stored as an `Option` rather than an inverted `bool` so that one absent
+    /// key means the same thing to `Default` and to serde: a plain `bool`
+    /// defaults to `false`, and the container's `#[serde(default)]` would then
+    /// disagree with [`Default`] about what a missing field is. Choosing
+    /// "follow" also clears this rather than writing `true`, so the ordinary
+    /// setting is the one that never reaches the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_scroll: Option<bool>,
 }
 
 impl Settings {
@@ -128,6 +147,14 @@ impl Settings {
         self.editor_max_width = size(self.editor_max_width, EDITOR_WIDTH_RANGE);
         self.preview_padding = size(self.preview_padding, PREVIEW_PADDING_RANGE);
         self
+    }
+
+    /// Whether the preview should follow the source pane's scrolling.
+    ///
+    /// An absent field is a yes: this is on for anyone who never opens the
+    /// setting, which is what makes the two panes feel like one document.
+    pub fn follows_scroll(&self) -> bool {
+        self.sync_scroll.unwrap_or(true)
     }
 
     /// Read the settings, falling back to the defaults.
@@ -270,12 +297,14 @@ mod tests {
         let settings = Settings {
             theme: ThemePreference::Dark,
             typesetting: Platform::WeChat,
+            typesetting_style: Style::Magazine,
             font_family: Some("Iosevka".to_string()),
             font_size: Some(17.0),
             mono_font_family: Some("JetBrains Mono".to_string()),
             mono_font_size: Some(15.5),
             editor_max_width: Some(720.0),
             preview_padding: Some(32.0),
+            sync_scroll: Some(false),
         };
 
         settings.save_to(&path).unwrap();
@@ -363,6 +392,37 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The same for the styles, whose names happen to fall out of the enum
+    /// cleanly — pinned anyway, because that is the sort of thing a rename
+    /// breaks silently and a settings file is read back by name.
+    #[test]
+    fn every_style_has_a_stable_slug_in_the_file() {
+        let dir = scratch("style-slugs");
+        let path = dir.join(FILE_NAME);
+
+        for (style, slug) in [
+            (Style::Default, "default"),
+            (Style::Minimal, "minimal"),
+            (Style::Magazine, "magazine"),
+        ] {
+            let settings = Settings {
+                typesetting: Platform::WeChat,
+                typesetting_style: style,
+                ..Default::default()
+            };
+            settings.save_to(&path).unwrap();
+
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                text.contains(&format!("\"typesetting_style\": \"{slug}\"")),
+                "{text}"
+            );
+            assert_eq!(Settings::load_from(&path).typesetting_style, style);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn out_of_range_sizes_are_pulled_back_into_range() {
         let dir = scratch("range");
@@ -439,6 +499,49 @@ mod tests {
         assert!(!text.contains("font_family"));
         assert!(!text.contains("editor_max_width"));
         assert!(!text.contains("preview_padding"));
+        // Following the source pane is the default, so it too is left out.
+        assert!(!text.contains("sync_scroll"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The preview follows the source pane unless it has been told not to, and
+    /// saying so once is remembered.
+    #[test]
+    fn following_the_source_pane_is_on_until_it_is_turned_off() {
+        assert!(Settings::default().follows_scroll());
+
+        let dir = scratch("scroll");
+        let path = dir.join(FILE_NAME);
+        Settings {
+            sync_scroll: Some(false),
+            ..Default::default()
+        }
+        .save_to(&path)
+        .unwrap();
+
+        assert!(!Settings::load_from(&path).follows_scroll());
+        // Turning it off is a change, so unlike the default it is written out.
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("sync_scroll")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file written by an older build knows nothing about the field, and has
+    /// to come back with the panes still following one another.
+    #[test]
+    fn a_file_without_the_setting_still_follows_the_source_pane() {
+        let dir = scratch("scroll-absent");
+        let path = dir.join(FILE_NAME);
+        std::fs::write(&path, "{\n  \"theme\": \"dark\"\n}\n").unwrap();
+
+        let settings = Settings::load_from(&path);
+        assert_eq!(settings.theme, ThemePreference::Dark);
+        assert!(settings.follows_scroll());
 
         std::fs::remove_dir_all(&dir).ok();
     }

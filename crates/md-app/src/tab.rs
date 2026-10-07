@@ -8,10 +8,11 @@ use gpui_kit::base::{h_resizable, resizable_panel};
 use gpui_kit::component::input::InputEvent;
 use gpui_kit::*;
 
-use md_core::Document;
+use md_core::{Document, scroll};
 
 use crate::editor::EditorPane;
 use crate::preview::PreviewPane;
+use crate::settings::AppSettings;
 
 /// How long typing must pause before the preview re-renders.
 ///
@@ -29,6 +30,21 @@ pub struct Tab {
     editor: Entity<EditorPane>,
     preview: Entity<PreviewPane>,
     _input_subscription: Subscription,
+    /// Watches the source pane for the scrolling that arrives without an
+    /// `InputEvent` — a wheel, a page key, a dragged scrollbar.
+    ///
+    /// `InputEvent` has no scroll variant, so the change subscription above
+    /// cannot see any of it. What it can see is the `cx.notify()` that
+    /// `update_scroll_offset` issues once the offset really has moved, which
+    /// every one of those paths goes through.
+    _scroll_subscription: Subscription,
+    /// How many lines the buffer holds.
+    ///
+    /// Kept so a scroll frame can size the source pane without walking its
+    /// text, which would otherwise happen on every frame of a drag. It is
+    /// refreshed on the keystrokes that change it, from the copy the change
+    /// handler has already made.
+    lines: usize,
     /// The debounce timer currently in flight, if any.
     ///
     /// Dropping a GPUI `Task` cancels it, so replacing this field on each
@@ -48,17 +64,44 @@ impl Tab {
                 // Keep the document in step with the editor: it is what the tab
                 // label's dirty dot and the save/close prompts read.
                 this.document.set_text(markdown.clone());
+                // The pane has just been re-measured — the buffer it counts has
+                // changed — and this is the one place the text is already in
+                // hand. Counting here keeps the scroll path free of the walk.
+                this.lines = scroll::line_count(&markdown);
                 this.queue_preview(markdown, cx);
                 cx.notify();
             }
         });
 
+        let scroll_subscription = cx.observe(&source, |this, source, cx| {
+            if !AppSettings::current(cx).follows_scroll() {
+                return;
+            }
+            let fraction = {
+                let state = source.read(cx);
+                // Before the first layout there is no line height, and so no
+                // way to size the pane. Nothing has scrolled yet either.
+                let Some(line_height) = state.line_height() else {
+                    return;
+                };
+                let viewport = state.input_bounds().size.height.as_f32();
+                let span = scroll::extent(this.lines, line_height.as_f32(), viewport);
+                scroll::fraction(state.scroll_offset().y.as_f32(), span)
+            };
+            // `state` borrowed `cx`, so the read had to end before this.
+            this.preview
+                .update(cx, |preview, cx| preview.scroll_to_fraction(fraction, cx));
+        });
+
+        let lines = scroll::line_count(document.text());
         let mut tab = Self {
             id,
             document,
             editor,
             preview,
             _input_subscription: input_subscription,
+            _scroll_subscription: scroll_subscription,
+            lines,
             debounce: None,
         };
         // Render the document rather than waiting for the first keystroke.

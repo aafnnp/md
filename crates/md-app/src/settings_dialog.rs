@@ -31,10 +31,10 @@ use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::{ActiveTheme, IndexPath, WindowExt as _, v_flex};
 use gpui_kit::*;
-use md_core::Platform;
 use md_core::settings::{
     EDITOR_WIDTH_RANGE, FONT_SIZE_RANGE, PREVIEW_PADDING_RANGE, Settings, ThemePreference,
 };
+use md_core::{Platform, Style};
 
 use crate::settings::{self, AppSettings};
 
@@ -666,6 +666,78 @@ impl SettingsForm {
         // redraw is the whole of the work.
         self.finish(cx);
     }
+
+    /// How the chosen layout is dressed.
+    ///
+    /// Greyed out under "No layout", with a line saying which of the two
+    /// settings to change. A live row of radios that changed nothing on export
+    /// would be worse than a dead one: it would take a click, look as if it had
+    /// done something, and change no part of any file the app writes.
+    fn style_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let chosen = self.settings.typesetting_style;
+        RadioGroup::horizontal("settings-style")
+            .disabled(self.settings.typesetting == Platform::Plain)
+            .selected_index(Style::ALL.iter().position(|one| *one == chosen))
+            .children(Style::ALL.into_iter().enumerate().map(|(index, style)| {
+                Radio::new(("settings-style", index))
+                    .label(style.label())
+                    .checked(style == chosen)
+            }))
+            .on_change(cx.listener(|this, index: &usize, _, cx| this.set_style(*index, cx)))
+    }
+
+    fn set_style(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(style) = Style::ALL.get(index).copied() else {
+            return;
+        };
+        if self.settings.typesetting_style == style {
+            return;
+        }
+        self.settings.typesetting_style = style;
+
+        AppSettings::set(self.settings.clone(), cx);
+        // As with the layout above: read when a document is exported or copied,
+        // so writing it down and asking for a redraw is the whole of the work.
+        self.finish(cx);
+    }
+
+    /// Whether the preview keeps pace with the source pane.
+    ///
+    /// Two labelled radios rather than a switch, because every other row in
+    /// this panel is a row of radios and a panel of mixed shapes reads as
+    /// mixed kinds of question — the user would have to work out what a
+    /// switch means here that a radio meant there.
+    fn follow_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let following = self.settings.follows_scroll();
+        RadioGroup::horizontal("settings-follow")
+            .selected_index(Some(if following { 0 } else { 1 }))
+            .children([
+                Radio::new(("settings-follow", 0usize))
+                    .label("跟随")
+                    .checked(following),
+                Radio::new(("settings-follow", 1usize))
+                    .label("不跟随")
+                    .checked(!following),
+            ])
+            .on_change(cx.listener(|this, index: &usize, _, cx| this.set_follow(*index == 0, cx)))
+    }
+
+    fn set_follow(&mut self, following: bool, cx: &mut Context<Self>) {
+        // Stored as an option because following is the default: writing `true`
+        // would be writing the ordinary setting into the file, and the file is
+        // meant to hold only what was chosen. Choosing "follow" clears the key.
+        let sync_scroll = (!following).then_some(false);
+        if self.settings.sync_scroll == sync_scroll {
+            return;
+        }
+        self.settings.sync_scroll = sync_scroll;
+
+        AppSettings::set(self.settings.clone(), cx);
+        // Read on the next scroll rather than applied to the frame being drawn
+        // — turning it off does not move either pane, it stops the next move
+        // from being copied across.
+        self.finish(cx);
+    }
 }
 
 impl Render for SettingsForm {
@@ -674,6 +746,15 @@ impl Render for SettingsForm {
 
         body = body.child(setting("Theme", self.theme_control(cx)));
         body = body.child(setting("Typesetting", self.typesetting_control(cx)));
+        // The colour is read out first because the control below borrows `cx`
+        // mutably for as long as the element it builds is alive — so a note
+        // that wanted `cx` itself could not be built beside it.
+        let muted = cx.theme().muted_foreground;
+        let style_control = self.style_control(cx);
+        let style_hint = (self.settings.typesetting == Platform::Plain)
+            .then_some("Choose a layout first — there is nothing to dress without one.");
+        body = body.child(setting_with_note("Style", style_control, style_hint, muted));
+        body = body.child(setting("Sync scroll", self.follow_control(cx)));
 
         for entry in &self.choices {
             body = body.child(setting(entry.choice.name(), entry.control(cx)));
@@ -721,6 +802,27 @@ fn setting(name: &str, control: impl IntoElement) -> impl IntoElement {
         .gap_1()
         .child(div().text_sm().child(name.to_string()))
         .child(control)
+}
+
+/// A setting whose control can be out of reach, with the line saying why.
+///
+/// The reason sits in the same place as the line under a text field, because it
+/// is the same kind of sentence: something about this value the user needs to
+/// know before touching it.
+fn setting_with_note(
+    name: &str,
+    control: impl IntoElement,
+    hint: Option<&str>,
+    muted: Hsla,
+) -> impl IntoElement {
+    let row = v_flex()
+        .gap_1()
+        .child(div().text_sm().child(name.to_string()))
+        .child(control);
+    match hint {
+        Some(hint) => row.child(div().text_sm().text_color(muted).child(hint.to_string())),
+        None => row,
+    }
 }
 
 /// A field, the line under it, and — when there is one — a complaint in place
